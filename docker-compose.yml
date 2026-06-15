@@ -1,0 +1,23 @@
+services:
+  mimo-code-proxy:
+    build: .
+    container_name: mimo-code-proxy
+    restart: unless-stopped
+    ports:
+      - "${MIMO_PORT:-8788}:8788"
+    environment:
+      - MIMO_HOST=0.0.0.0
+      - MIMO_PORT=8788
+      - MIMO_KEY=${MIMO_KEY:-}
+      - MIMO_UPSTREAM=${MIMO_UPSTREAM:-https://api.xiaomimimo.com}
+    volumes:
+      - mimo-data:/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mimo-data:
