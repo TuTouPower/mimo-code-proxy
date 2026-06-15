@@ -1,23 +1,60 @@
+x-base: &base
+  build: .
+  restart: unless-stopped
+  environment:
+    - MIMO_HOST=0.0.0.0
+    - MIMO_UPSTREAM=${MIMO_UPSTREAM:-https://api.xiaomimimo.com}
+  healthcheck:
+    test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$${MIMO_PORT}/v1/health')"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 10s
+
 services:
-  mimo-code-proxy:
-    build: .
-    container_name: mimo-code-proxy
-    restart: unless-stopped
+  mimo-1:
+    <<: *base
+    container_name: mimo-proxy-1
     ports:
-      - "${MIMO_PORT:-8788}:8788"
+      - "8788:8788"
     environment:
       - MIMO_HOST=0.0.0.0
       - MIMO_PORT=8788
-      - MIMO_KEY=${MIMO_KEY:-}
+      - MIMO_KEY=${MIMO_KEY_1:-}
+      - MIMO_CLIENT_ID=${MIMO_FP_1:-}
       - MIMO_UPSTREAM=${MIMO_UPSTREAM:-https://api.xiaomimimo.com}
     volumes:
-      - mimo-data:/data
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/v1/health')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      - mimo-data-1:/data
+
+  mimo-2:
+    <<: *base
+    container_name: mimo-proxy-2
+    ports:
+      - "8789:8788"
+    environment:
+      - MIMO_HOST=0.0.0.0
+      - MIMO_PORT=8788
+      - MIMO_KEY=${MIMO_KEY_2:-}
+      - MIMO_CLIENT_ID=${MIMO_FP_2:-}
+      - MIMO_UPSTREAM=${MIMO_UPSTREAM:-https://api.xiaomimimo.com}
+    volumes:
+      - mimo-data-2:/data
+
+  mimo-3:
+    <<: *base
+    container_name: mimo-proxy-3
+    ports:
+      - "8790:8788"
+    environment:
+      - MIMO_HOST=0.0.0.0
+      - MIMO_PORT=8788
+      - MIMO_KEY=${MIMO_KEY_3:-}
+      - MIMO_CLIENT_ID=${MIMO_FP_3:-}
+      - MIMO_UPSTREAM=${MIMO_UPSTREAM:-https://api.xiaomimimo.com}
+    volumes:
+      - mimo-data-3:/data
 
 volumes:
-  mimo-data:
+  mimo-data-1:
+  mimo-data-2:
+  mimo-data-3:

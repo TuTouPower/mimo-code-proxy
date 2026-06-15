@@ -20,21 +20,31 @@ class TestFingerprint(unittest.TestCase):
     def setUp(self):
         proxy._jwt = None
         proxy._jwt_exp = 0
+        self._saved_client_id = os.environ.pop("MIMO_CLIENT_ID", None)
 
-    def test_get_fp_returns_64_char_hex(self):
+    def tearDown(self):
+        if self._saved_client_id:
+            os.environ["MIMO_CLIENT_ID"] = self._saved_client_id
+
+    def test_get_fp_returns_uuid_format(self):
         fp = proxy.get_fp()
-        self.assertEqual(len(fp), 64)
-        self.assertTrue(all(c in "0123456789abcdef" for c in fp))
+        parts = fp.split("-")
+        self.assertEqual(len(parts), 5)
+        self.assertEqual(len(fp), 36)
+
+    def test_get_fp_from_env(self):
+        os.environ["MIMO_CLIENT_ID"] = "my-custom-fp"
+        self.assertEqual(proxy.get_fp(), "my-custom-fp")
 
     def test_get_fp_cached_from_file(self):
         with patch.object(proxy, "open", unittest.mock.mock_open(read_data="cached-fp")):
             fp = proxy.get_fp()
             self.assertEqual(fp, "cached-fp")
 
-    def test_get_fp_deterministic(self):
-        fp1 = proxy.get_fp()
-        fp2 = proxy.get_fp()
-        self.assertEqual(fp1, fp2)
+    def test_get_fp_deterministic_with_env(self):
+        os.environ["MIMO_CLIENT_ID"] = "fixed-fp"
+        self.assertEqual(proxy.get_fp(), "fixed-fp")
+        self.assertEqual(proxy.get_fp(), "fixed-fp")
 
 
 class TestJwtDecode(unittest.TestCase):

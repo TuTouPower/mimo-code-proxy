@@ -5,9 +5,8 @@ import os
 import sys
 import time
 import base64
-import hashlib
+import uuid
 import threading
-import platform
 import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,19 +43,17 @@ def log(*a):
 
 
 def get_fp():
+    fp = os.environ.get("MIMO_CLIENT_ID", "").strip()
+    if fp:
+        log("using MIMO_CLIENT_ID")
+        return fp
     try:
-        v = open(CLIENT_FILE).read().strip()
-        if v:
-            return v
+        fp = open(CLIENT_FILE).read().strip()
+        if fp:
+            return fp
     except Exception:
         pass
-    cpu = platform.processor() or "x86_64"
-    try:
-        user = os.getlogin()
-    except Exception:
-        user = os.environ.get("USER", "root")
-    raw = "|".join([platform.node(), "linux", "x64", cpu, user])
-    fp = hashlib.sha256(raw.encode()).hexdigest()
+    fp = str(uuid.uuid4())
     try:
         os.makedirs(os.path.dirname(CLIENT_FILE), exist_ok=True)
         with open(CLIENT_FILE, "w") as f:
@@ -64,6 +61,7 @@ def get_fp():
         os.chmod(CLIENT_FILE, 0o600)
     except Exception as e:
         log("warn: cannot persist fingerprint", e)
+    log("generated new fp:", fp)
     return fp
 
 
