@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import io
 import base64
 import threading
 import unittest
@@ -18,33 +19,34 @@ import mimo_code_proxy as proxy
 
 class TestFingerprint(unittest.TestCase):
     def setUp(self):
-        proxy._jwt = None
-        proxy._jwt_exp = 0
+        proxy._active_client = None
+        proxy._active_jwt = None
+        proxy._active_jwt_exp = 0
         self._saved_client_id = os.environ.pop("MIMO_CLIENT_ID", None)
 
     def tearDown(self):
         if self._saved_client_id:
             os.environ["MIMO_CLIENT_ID"] = self._saved_client_id
 
-    def test_get_fp_returns_uuid_format(self):
-        fp = proxy.get_fp()
+    def test_load_or_create_fp_returns_uuid_format(self):
+        fp = proxy._load_or_create_fp()
         parts = fp.split("-")
         self.assertEqual(len(parts), 5)
         self.assertEqual(len(fp), 36)
 
-    def test_get_fp_from_env(self):
+    def test_load_or_create_fp_from_env(self):
         os.environ["MIMO_CLIENT_ID"] = "my-custom-fp"
-        self.assertEqual(proxy.get_fp(), "my-custom-fp")
+        self.assertEqual(proxy._load_or_create_fp(), "my-custom-fp")
 
-    def test_get_fp_cached_from_file(self):
+    def test_load_or_create_fp_cached_from_file(self):
         with patch.object(proxy, "open", unittest.mock.mock_open(read_data="cached-fp")):
-            fp = proxy.get_fp()
+            fp = proxy._load_or_create_fp()
             self.assertEqual(fp, "cached-fp")
 
-    def test_get_fp_deterministic_with_env(self):
+    def test_load_or_create_fp_deterministic_with_env(self):
         os.environ["MIMO_CLIENT_ID"] = "fixed-fp"
-        self.assertEqual(proxy.get_fp(), "fixed-fp")
-        self.assertEqual(proxy.get_fp(), "fixed-fp")
+        self.assertEqual(proxy._load_or_create_fp(), "fixed-fp")
+        self.assertEqual(proxy._load_or_create_fp(), "fixed-fp")
 
 
 class TestJwtDecode(unittest.TestCase):
@@ -70,15 +72,18 @@ class TestHealthCheck(unittest.TestCase):
     def setUp(self):
         proxy._health_ok = False
         proxy._health_ts = 0
+        proxy._active_client = "test-fp-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        proxy._active_jwt = "test-jwt"
+        proxy._active_jwt_exp = (time.time() + 3600) * 1000
 
     def test_check_health_ok(self):
-        with patch("mimo_code_proxy.get_jwt", return_value="mock-jwt"):
+        with patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt"):
             ok, err = proxy.check_health()
             self.assertTrue(ok)
             self.assertIsNone(err)
 
     def test_check_health_degraded(self):
-        with patch("mimo_code_proxy.get_jwt", side_effect=Exception("boom")):
+        with patch("mimo_code_proxy.ensure_jwt", side_effect=Exception("boom")):
             ok, err = proxy.check_health()
             self.assertFalse(ok)
             self.assertIn("boom", err)
@@ -159,7 +164,7 @@ class TestServer(unittest.TestCase):
         )
         return urllib.request.urlopen(req, timeout=10)
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     def test_health_returns_ok(self, _mock):
         resp = self._get("/health")
         self.assertEqual(resp.status, 200)
@@ -167,13 +172,13 @@ class TestServer(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         self.assertEqual(data["upstream"], "ok")
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     def test_health_no_auth_needed(self, _mock):
         resp = self._get("/health")
         data = json.loads(resp.read())
         self.assertEqual(data["status"], "ok")
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     def test_models_with_valid_key(self, _mock):
         resp = self._get("/v1/models", {"Authorization": "Bearer sk-test-key"})
         self.assertEqual(resp.status, 200)
@@ -194,7 +199,7 @@ class TestServer(unittest.TestCase):
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 401)
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
     def test_chat_without_key_returns_401(self, _mock_chat, _mock_jwt):
         try:
@@ -203,7 +208,7 @@ class TestServer(unittest.TestCase):
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 401)
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
     def test_chat_success_response(self, mock_chat, _mock_jwt):
         mock_resp = MagicMock()
@@ -220,7 +225,7 @@ class TestServer(unittest.TestCase):
         )
         self.assertEqual(resp.status, 200)
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
     def test_chat_upstream_502_propagates(self, mock_chat, _mock_jwt):
         mock_chat.side_effect = Exception("upstream down")
@@ -253,11 +258,11 @@ class TestServer(unittest.TestCase):
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 404)
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     def test_bootstrap_failure_falls_back(self, _mock):
         resp = self._get("/v1/models", {"Authorization": "Bearer sk-test-key"})
         self.assertEqual(resp.status, 200)
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
     def test_stream_response_chunked(self, mock_chat, _mock_jwt):
         chunks = [b'data: {"choices":[{"delta":{"content":"h"}}]}\n\n',
@@ -287,7 +292,7 @@ class TestServer(unittest.TestCase):
         body = resp.read()
         self.assertIn(b"[DONE]", body)
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
     def test_non_stream_has_content_length(self, mock_chat, _mock_jwt):
         mock_resp = MagicMock()
@@ -352,7 +357,7 @@ class TestPathCompatibility(unittest.TestCase):
     def _url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     def test_health_no_v1_prefix(self, _mock):
         req = urllib.request.Request(self._url("/health"))
         resp = urllib.request.urlopen(req, timeout=10)
@@ -363,7 +368,7 @@ class TestPathCompatibility(unittest.TestCase):
         resp = urllib.request.urlopen(req, timeout=10)
         self.assertEqual(resp.status, 200)
 
-    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
     def test_chat_no_v1_prefix(self, mock_chat, _mock_jwt):
         mock_resp = MagicMock()
@@ -381,12 +386,13 @@ class TestPathCompatibility(unittest.TestCase):
 
 class TestUpstreamChatLogic(unittest.TestCase):
     def setUp(self):
-        proxy._jwt = None
-        proxy._jwt_exp = 0
+        proxy._active_client = "test-fp-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        proxy._active_jwt = None
+        proxy._active_jwt_exp = 0
         proxy.LOCAL_KEY = ""
 
     def test_guard_prompt_injected(self):
-        with patch("mimo_code_proxy.get_jwt") as mock_jwt, patch(
+        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
             "urllib.request.urlopen"
         ) as mock_urlopen:
             mock_jwt.return_value = "test-jwt"
@@ -405,7 +411,7 @@ class TestUpstreamChatLogic(unittest.TestCase):
             self.assertIn("MiMoCode", body["messages"][0]["content"])
 
     def test_guard_not_duplicated(self):
-        with patch("mimo_code_proxy.get_jwt") as mock_jwt, patch(
+        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
             "urllib.request.urlopen"
         ) as mock_urlopen:
             mock_jwt.return_value = "test-jwt"
@@ -428,7 +434,7 @@ class TestUpstreamChatLogic(unittest.TestCase):
             self.assertEqual(len(body["messages"]), 2)
 
     def test_max_tokens_clamped(self):
-        with patch("mimo_code_proxy.get_jwt") as mock_jwt, patch(
+        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
             "urllib.request.urlopen"
         ) as mock_urlopen:
             mock_jwt.return_value = "test-jwt"
@@ -449,7 +455,7 @@ class TestUpstreamChatLogic(unittest.TestCase):
             self.assertEqual(body["max_tokens"], proxy.MAX_OUTPUT_TOKENS)
 
     def test_model_forced_to_mimo_auto(self):
-        with patch("mimo_code_proxy.get_jwt") as mock_jwt, patch(
+        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
             "urllib.request.urlopen"
         ) as mock_urlopen:
             mock_jwt.return_value = "test-jwt"
@@ -468,6 +474,52 @@ class TestUpstreamChatLogic(unittest.TestCase):
             call_args = mock_urlopen.call_args[0][0]
             body = json.loads(call_args.data)
             self.assertEqual(body["model"], "mimo-auto")
+
+
+class TestFingerprintRotation(unittest.TestCase):
+    def setUp(self):
+        proxy._active_client = "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
+        proxy._active_jwt = "test-jwt-0"
+        proxy._active_jwt_exp = (time.time() + 3600) * 1000
+        self._saved = os.environ.pop("MIMO_CLIENT_ID", None)
+        proxy.LOCAL_KEY = ""
+
+    def tearDown(self):
+        if self._saved:
+            os.environ["MIMO_CLIENT_ID"] = self._saved
+
+    def test_first_failure_rotates_fp(self):
+        call_count = [0]
+        def _fake_upstream(req, timeout=300):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise urllib.error.HTTPError(
+                    "url", 429, "rate limited", {}, io.BytesIO(b"{}")
+                )
+            resp = MagicMock()
+            resp.headers = {"Content-Type": "application/json"}
+            resp.read.return_value = b"{}"
+            resp.status = 200
+            return resp
+
+        with patch("mimo_code_proxy.ensure_jwt", return_value="test-jwt"), \
+             patch("mimo_code_proxy._replace_fingerprint") as mock_replace, \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = _fake_upstream
+            proxy.upstream_chat({"messages": [{"role": "user", "content": "hi"}]})
+
+        self.assertEqual(call_count[0], 2)
+        mock_replace.assert_called_once()
+
+    def test_exhaust_retries_raises_last_error(self):
+        with patch("mimo_code_proxy.ensure_jwt", return_value="test-jwt"), \
+             patch("mimo_code_proxy._replace_fingerprint"), \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                "url", 429, "rate limited", {}, io.BytesIO(b"{}")
+            )
+            with self.assertRaises(urllib.error.HTTPError):
+                proxy.upstream_chat({"messages": [{"role": "user", "content": "hi"}]})
 
 
 if __name__ == "__main__":

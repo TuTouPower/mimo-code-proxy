@@ -33,9 +33,13 @@ MIMO_GUARD_TEXT = (
     "CTF challenges, and educational contexts."
 )
 
-_jwt = None
-_jwt_exp = 0
-_lock = threading.Lock()
+MIMO_MAX_RETRY = int(os.environ.get("MIMO_MAX_RETRY", "3"))
+REFRESH_MARGIN = 300
+
+_active_client = None
+_active_jwt = None
+_active_jwt_exp = 0
+_fp_lock = threading.Lock()
 _health_ok = False
 _health_ts = 0
 _HEALTH_CACHE_S = 30
@@ -62,14 +66,16 @@ def new_req_id():
     return uuid.uuid4().hex[:8]
 
 
-def get_fp():
+def _load_or_create_fp():
+    """从 CLIENT_FILE 或 MIMO_CLIENT_ID 读取，否则生成新 UUID 并持久化。"""
     fp = os.environ.get("MIMO_CLIENT_ID", "").strip()
     if fp:
-        log("INFO", "using MIMO_CLIENT_ID")
+        log("DEBUG", "using MIMO_CLIENT_ID")
         return fp
     try:
         fp = open(CLIENT_FILE).read().strip()
         if fp:
+            log("DEBUG", "loaded fp from file")
             return fp
     except Exception:
         pass
@@ -80,9 +86,64 @@ def get_fp():
             f.write(fp)
         os.chmod(CLIENT_FILE, 0o600)
     except Exception as e:
-        log("WARN", "warn: cannot persist fingerprint", e)
-    log("INFO", "generated new fp:", fp)
+        log("WARN", "cannot persist fingerprint", e)
+    log("INFO", "generated new fp:", fp[:8] + "...")
     return fp
+
+
+def _persist_fp(fp):
+    try:
+        os.makedirs(os.path.dirname(CLIENT_FILE), exist_ok=True)
+        with open(CLIENT_FILE, "w") as f:
+            f.write(fp)
+        os.chmod(CLIENT_FILE, 0o600)
+    except Exception as e:
+        log("WARN", "cannot persist fingerprint", e)
+
+
+def _fingerprint():
+    global _active_client, _active_jwt, _active_jwt_exp
+    return _active_client, _active_jwt, _active_jwt_exp
+
+
+def _replace_fingerprint(req_id=None):
+    """生成新指纹，bootstrap 新 JWT，持久化。调用方需持有 _fp_lock。"""
+    global _active_client, _active_jwt, _active_jwt_exp
+    old = _active_client[:8] + "..." if _active_client else "none"
+    _active_client = str(uuid.uuid4())
+    _active_jwt = None
+    _active_jwt_exp = 0
+    _persist_fp(_active_client)
+    log("INFO", "fingerprint rotated", old, "->", _active_client[:8] + "...", req_id=req_id)
+    _active_jwt, _active_jwt_exp = _bootstrap_with(_active_client, req_id=req_id)
+
+
+def _bootstrap_with(client, req_id=None):
+    body = json.dumps({"client": client}).encode()
+    req = urllib.request.Request(
+        BOOTSTRAP_URL, data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.loads(r.read().decode())
+    jwt = data.get("jwt")
+    if not jwt:
+        raise RuntimeError("bootstrap missing jwt")
+    exp = _decode_exp(jwt)
+    log("DEBUG", "bootstrap ok fp=" + client[:8] + "... exp_in=" + str(int((exp - time.time() * 1000) / 1000)) + "s", req_id=req_id)
+    return jwt, exp
+
+
+def ensure_jwt(req_id=None):
+    """确保当前活跃指纹有有效 JWT。过期则同指纹重 bootstrap，不计入 retry。"""
+    global _active_jwt, _active_jwt_exp
+    with _fp_lock:
+        now = time.time() * 1000
+        if _active_jwt and (_active_jwt_exp - now) > REFRESH_MARGIN * 1000:
+            return _active_jwt
+        log("DEBUG", "JWT expired or missing, re-bootstrap same fp", req_id=req_id)
+        _active_jwt, _active_jwt_exp = _bootstrap_with(_active_client, req_id=req_id)
+        return _active_jwt
 
 
 def _decode_exp(jwt):
@@ -95,40 +156,7 @@ def _decode_exp(jwt):
     return time.time() * 1000 + 3600 * 1000
 
 
-def _bootstrap():
-    body = json.dumps({"client": get_fp()}).encode()
-    req = urllib.request.Request(
-        BOOTSTRAP_URL, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.loads(r.read().decode())
-    jwt = data.get("jwt")
-    if not jwt:
-        raise RuntimeError("bootstrap missing jwt")
-    return jwt, _decode_exp(jwt)
-
-
-def get_jwt(force=False):
-    global _jwt, _jwt_exp
-    with _lock:
-        now = time.time() * 1000
-        if not force and _jwt and (_jwt_exp - now) > REFRESH_MARGIN * 1000:
-            return _jwt
-        _jwt, _jwt_exp = _bootstrap()
-        log("DEBUG", "JWT refreshed, exp in " + str(int((_jwt_exp - now) / 1000)) + "s")
-        return _jwt
-
-
-def normalize_path(path):
-    """去掉查询串和尾斜杠，剥掉可选 /v1 前缀，返回精确末段。"""
-    p = path.split("?")[0].rstrip("/")
-    if p.startswith("/v1/"):
-        return p[3:]  # 去掉 /v1，保留 /models 或 /chat/completions
-    return p
-
-
-def upstream_chat(payload):
+def upstream_chat(payload, req_id=None):
     payload = dict(payload)
     payload["model"] = UPSTREAM_MODEL
     if MIMO_GUARD_TEXT:
@@ -145,28 +173,65 @@ def upstream_chat(payload):
     for f in ("max_tokens", "max_completion_tokens"):
         v = payload.get(f)
         if isinstance(v, int) and v > MAX_OUTPUT_TOKENS:
-            log("DEBUG", "clamp " + f + " " + str(v) + " -> " + str(MAX_OUTPUT_TOKENS))
+            log("DEBUG", "clamp " + f + " " + str(v) + " -> " + str(MAX_OUTPUT_TOKENS), req_id=req_id)
             payload[f] = MAX_OUTPUT_TOKENS
 
-    def _do(jwt):
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            CHAT_URL, data=body, method="POST",
-            headers={
-                "Authorization": f"Bearer {jwt}",
-                "X-Mimo-Source": "mimocode-cli-free",
-                "Content-Type": "application/json",
-            },
-        )
-        return urllib.request.urlopen(req, timeout=300)
+    log("DEBUG", "request model=" + payload.get("model", "?") +
+        " stream=" + str(payload.get("stream", False)) +
+        " messages=" + json.dumps(payload.get("messages", []), ensure_ascii=False),
+        req_id=req_id)
 
-    try:
-        return _do(get_jwt())
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            log("INFO", "got " + str(e.code) + " -> refresh JWT retry")
-            return _do(get_jwt(force=True))
-        raise
+    last_error = None
+    for retry in range(MIMO_MAX_RETRY + 1):
+        try:
+            jwt = ensure_jwt(req_id=req_id)
+        except Exception as e:
+            log("WARN", "bootstrap failed retry=" + str(retry) + "/" + str(MIMO_MAX_RETRY), repr(e), req_id=req_id)
+            if retry >= MIMO_MAX_RETRY:
+                raise RuntimeError("bootstrap exhausted: " + str(e))
+            with _fp_lock:
+                _replace_fingerprint(req_id=req_id)
+            continue
+
+        try:
+            body = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                CHAT_URL, data=body, method="POST",
+                headers={
+                    "Authorization": "Bearer " + jwt,
+                    "X-Mimo-Source": "mimocode-cli-free",
+                    "Content-Type": "application/json",
+                },
+            )
+            log("DEBUG", "chat request retry=" + str(retry) + "/" + str(MIMO_MAX_RETRY),
+                "fp=" + (_active_client[:8] + "..."), req_id=req_id)
+            resp = urllib.request.urlopen(req, timeout=300)
+            log("DEBUG", "chat response status=" + str(resp.status), req_id=req_id)
+            return resp
+        except urllib.error.HTTPError as e:
+            last_error = e
+            log("WARN", "upstream HTTP " + str(e.code) + " retry=" + str(retry) + "/" + str(MIMO_MAX_RETRY), req_id=req_id)
+            if retry >= MIMO_MAX_RETRY:
+                raise
+            with _fp_lock:
+                _replace_fingerprint(req_id=req_id)
+        except Exception as e:
+            last_error = e
+            log("WARN", "upstream error retry=" + str(retry) + "/" + str(MIMO_MAX_RETRY), repr(e), req_id=req_id)
+            if retry >= MIMO_MAX_RETRY:
+                raise
+            with _fp_lock:
+                _replace_fingerprint(req_id=req_id)
+
+    raise last_error
+
+
+def normalize_path(path):
+    """去掉查询串和尾斜杠，剥掉可选 /v1 前缀，返回精确末段。"""
+    p = path.split("?")[0].rstrip("/")
+    if p.startswith("/v1/"):
+        return p[3:]  # 去掉 /v1，保留 /models 或 /chat/completions
+    return p
 
 
 MODELS_RESP = {
@@ -188,7 +253,7 @@ def check_health():
     if _health_ok and (now - _health_ts) < _HEALTH_CACHE_S:
         return True, None
     try:
-        get_jwt()
+        ensure_jwt()
         _health_ok = True
         _health_ts = now
         return True, None
@@ -246,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json(400, {"error": {"message": f"bad request: {e}"}})
         try:
-            resp = upstream_chat(payload)
+            resp = upstream_chat(payload, req_id=req_id)
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
             try:
@@ -296,9 +361,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    get_fp()
+    global _active_client
+    _active_client = _load_or_create_fp()
     try:
-        get_jwt()
+        with _fp_lock:
+            _active_jwt, _active_jwt_exp = _bootstrap_with(_active_client)
         log("INFO", "startup JWT ok")
     except Exception as e:
         log("ERROR", "startup bootstrap failed (will retry on request):", e)
