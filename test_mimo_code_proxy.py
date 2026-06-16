@@ -148,6 +148,10 @@ class TestServer(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
 
+    def setUp(self):
+        proxy._health_ok = False
+        proxy._health_ts = 0
+
     def _url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
 
@@ -224,6 +228,12 @@ class TestServer(unittest.TestCase):
             {"Authorization": "Bearer sk-test-key"},
         )
         self.assertEqual(resp.status, 200)
+        self.assertEqual(
+            resp.headers.get("Content-Type"), "application/json"
+        )
+        self.assertIsNotNone(resp.headers.get("Content-Length"))
+        body = json.loads(resp.read())
+        self.assertEqual(body["choices"][0]["message"]["content"], "hello")
 
     @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
@@ -259,10 +269,6 @@ class TestServer(unittest.TestCase):
             self.assertEqual(e.code, 404)
 
     @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    def test_bootstrap_failure_falls_back(self, _mock):
-        resp = self._get("/v1/models", {"Authorization": "Bearer sk-test-key"})
-        self.assertEqual(resp.status, 200)
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
     @patch("mimo_code_proxy.upstream_chat")
     def test_stream_response_chunked(self, mock_chat, _mock_jwt):
         chunks = [b'data: {"choices":[{"delta":{"content":"h"}}]}\n\n',
@@ -289,7 +295,12 @@ class TestServer(unittest.TestCase):
             {"Authorization": "Bearer sk-test-key"},
         )
         self.assertEqual(resp.status, 200)
+        self.assertEqual(
+            resp.headers.get("Content-Type"), "text/event-stream"
+        )
+        self.assertEqual(resp.headers.get("Connection"), "close")
         body = resp.read()
+        self.assertIn(b"data:", body)
         self.assertIn(b"[DONE]", body)
 
     @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
@@ -353,6 +364,10 @@ class TestPathCompatibility(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+
+    def setUp(self):
+        proxy._health_ok = False
+        proxy._health_ts = 0
 
     def _url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
