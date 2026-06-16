@@ -257,6 +257,51 @@ class TestServer(unittest.TestCase):
     def test_bootstrap_failure_falls_back(self, _mock):
         resp = self._get("/v1/models", {"Authorization": "Bearer sk-test-key"})
         self.assertEqual(resp.status, 200)
+    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.upstream_chat")
+    def test_stream_response_chunked(self, mock_chat, _mock_jwt):
+        chunks = [b'data: {"choices":[{"delta":{"content":"h"}}]}\n\n',
+                  b'data: {"choices":[{"delta":{"content":"i"}}]}\n\n',
+                  b'data: [DONE]\n\n']
+        reads = iter(chunks)
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "text/event-stream"}
+
+        def _read(n=1024):
+            try:
+                return next(reads)
+            except StopIteration:
+                return b""
+
+        mock_resp.read = _read
+        mock_chat.return_value = mock_resp
+
+        resp = self._post(
+            "/chat/completions",
+            {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}],
+             "stream": True},
+            {"Authorization": "Bearer sk-test-key"},
+        )
+        self.assertEqual(resp.status, 200)
+        body = resp.read()
+        self.assertIn(b"[DONE]", body)
+
+    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.upstream_chat")
+    def test_non_stream_has_content_length(self, mock_chat, _mock_jwt):
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.read.return_value = b'{"choices":[]}'
+        mock_chat.return_value = mock_resp
+
+        resp = self._post(
+            "/chat/completions",
+            {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}]},
+            {"Authorization": "Bearer sk-test-key"},
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertIsNotNone(resp.headers.get("Content-Length"))
 
 
 class TestPathNormalization(unittest.TestCase):

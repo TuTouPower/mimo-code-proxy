@@ -234,6 +234,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):
+        req_id = new_req_id()
+        log("DEBUG", "POST", self.path, req_id=req_id)
         if normalize_path(self.path) != "/chat/completions":
             return self._json(404, {"error": {"message": "not found"}})
         if not self._auth_ok():
@@ -251,25 +253,44 @@ class Handler(BaseHTTPRequestHandler):
                 obj = json.loads(body)
             except Exception:
                 obj = {"error": {"message": body[:500], "code": e.code}}
+            log("DEBUG", "upstream HTTPError", e.code, req_id=req_id)
             return self._json(e.code, obj)
         except Exception as e:
+            log("ERROR", "upstream fatal", repr(e), req_id=req_id)
             return self._json(502, {"error": {"message": str(e)}})
-        self.send_response(200)
-        self.send_header(
-            "Content-Type",
-            resp.headers.get("Content-Type", "application/json"),
-        )
-        self.send_header("Connection", "close")
-        self.end_headers()
         try:
-            while True:
-                chunk = resp.read(8192)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
-        except Exception as e:
-            log("DEBUG", "stream relay ended", repr(e))
+            is_stream = payload.get("stream", False)
+            self.send_response(200)
+            content_type = resp.headers.get("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
+            if not is_stream:
+                body = resp.read()
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+                log("DEBUG", "non-stream response", len(body), "bytes", req_id=req_id)
+            else:
+                self.send_header("Connection", "close")
+                self.end_headers()
+                total = 0
+                t0 = time.time()
+                done_seen = False
+                try:
+                    while True:
+                        chunk = resp.read(1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                        if b"[DONE]" in chunk:
+                            done_seen = True
+                except Exception as e:
+                    log("DEBUG", "stream relay ended", repr(e), req_id=req_id)
+                elapsed = int((time.time() - t0) * 1000)
+                log("DEBUG", "stream done", total, "bytes", elapsed, "ms",
+                    "DONE=" + str(done_seen), req_id=req_id)
         finally:
             resp.close()
 
