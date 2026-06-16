@@ -118,7 +118,9 @@ class MimoBackend:
 
     def _decode_exp(self, jwt):
         try:
-            p = json.loads(base64.urlsafe_b64decode(jwt.split(".")[1] + "=="))
+            part = jwt.split(".")[1]
+            pad = 4 - len(part) % 4
+            p = json.loads(base64.urlsafe_b64decode(part + "=" * pad))
             if isinstance(p.get("exp"), (int, float)):
                 return p["exp"] * 1000
         except Exception:
@@ -223,6 +225,9 @@ class RoundRobin:
         self._i = 0
         self._lock = threading.Lock()
 
+    def __len__(self):
+        return len(self._backends)
+
     def pick(self):
         with self._lock:
             b = self._backends[self._i]
@@ -282,7 +287,7 @@ def make_handler(balancer, api_key):
                     json.dumps(
                         {
                             "status": "ok",
-                            "backends": len(balancer._backends),
+                            "backends": len(balancer),
                         }
                     ).encode(),
                 )
@@ -308,7 +313,7 @@ def make_handler(balancer, api_key):
 
             last_error = None
             tried = set()
-            while len(tried) < len(balancer._backends):
+            while len(tried) < len(balancer):
                 be = balancer.pick()
                 if be.name in tried:
                     break
@@ -486,7 +491,11 @@ def main():
                 f"指纹: {be.fingerprint[:12]}...)",
             )
         except Exception as e:
-            log(f"[{be.name}] bootstrap 失败 (请求时重试): {e}")
+            log(
+                "WARN",
+                f"bootstrap 失败 (请求时重试): {e}",
+                backend=be.name,
+            )
         backends.append(be)
 
     balancer = RoundRobin(backends)

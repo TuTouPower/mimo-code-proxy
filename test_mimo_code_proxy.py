@@ -266,6 +266,8 @@ class TestRoundRobin(unittest.TestCase):
         self.assertEqual(rr.pick(), "a")
 
     def test_thread_safe(self):
+        # 10 threads x 100 picks each = 1000 picks.
+        # Lock guarantees exactly 500 each, no race.
         backends = ["a", "b"]
         rr = proxy.RoundRobin(backends)
         results = []
@@ -284,7 +286,6 @@ class TestRoundRobin(unittest.TestCase):
             t.join()
 
         self.assertEqual(len(results), 1000)
-        # Each backend should be picked roughly equally
         count_a = results.count("a")
         count_b = results.count("b")
         self.assertEqual(count_a, 500)
@@ -340,7 +341,8 @@ class TestServer(unittest.TestCase):
         be2.jwt = "test-jwt-2"
         be2.jwt_exp = (time.time() + 3600) * 1000
 
-        cls.balancer = proxy.RoundRobin([be1, be2])
+        cls.backends = [be1, be2]
+        cls.balancer = proxy.RoundRobin(cls.backends)
         handler_cls = proxy.make_handler(cls.balancer, "sk-test-key")
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
         cls.port = cls.server.server_address[1]
@@ -399,8 +401,7 @@ class TestServer(unittest.TestCase):
             b'{"choices":[{"message":{"content":"hello"}}]}'
         )
 
-        be = self.balancer.pick()
-        with patch.object(be, "chat", return_value=mock_resp):
+        with patch.object(self.backends[0], "chat", return_value=mock_resp):
             resp = self._post(
                 "/v1/chat/completions",
                 {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}]},
@@ -420,7 +421,7 @@ class TestServer(unittest.TestCase):
     def test_chat_upstream_error_propagates(self):
         from contextlib import ExitStack
         with ExitStack() as stack:
-            for be in self.balancer._backends:
+            for be in self.backends:
                 stack.enter_context(patch.object(be, "chat", side_effect=Exception("upstream down")))
             try:
                 self._post(
@@ -451,8 +452,7 @@ class TestServer(unittest.TestCase):
 
         mock_resp.read = _read
 
-        be = self.balancer.pick()
-        with patch.object(be, "chat", return_value=mock_resp):
+        with patch.object(self.backends[0], "chat", return_value=mock_resp):
             resp = self._post(
                 "/chat/completions",
                 {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}], "stream": True},
