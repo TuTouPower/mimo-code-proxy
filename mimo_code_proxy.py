@@ -38,14 +38,31 @@ _jwt_exp = 0
 _lock = threading.Lock()
 
 
-def log(*a):
-    print(f"[{time.strftime('%H:%M:%S')}]", *a, file=sys.stderr, flush=True)
+LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
+LOG_LEVEL = os.environ.get("MIMO_LOG_LEVEL", "INFO").upper()
+if LOG_LEVEL not in LOG_LEVELS:
+    LOG_LEVEL = "INFO"
+LOG_THRESHOLD = LOG_LEVELS[LOG_LEVEL]
+
+
+def log(level, *a, req_id=None):
+    if LOG_LEVELS.get(level, 1) < LOG_THRESHOLD:
+        return
+    ts = time.strftime("%H:%M:%S")
+    parts = [f"[{ts}]", f"[{level}]"]
+    if req_id:
+        parts.append(f"[req={req_id}]")
+    print(*parts, *a, file=sys.stderr, flush=True)
+
+
+def new_req_id():
+    return uuid.uuid4().hex[:8]
 
 
 def get_fp():
     fp = os.environ.get("MIMO_CLIENT_ID", "").strip()
     if fp:
-        log("using MIMO_CLIENT_ID")
+        log("INFO", "using MIMO_CLIENT_ID")
         return fp
     try:
         fp = open(CLIENT_FILE).read().strip()
@@ -60,8 +77,8 @@ def get_fp():
             f.write(fp)
         os.chmod(CLIENT_FILE, 0o600)
     except Exception as e:
-        log("warn: cannot persist fingerprint", e)
-    log("generated new fp:", fp)
+        log("WARN", "warn: cannot persist fingerprint", e)
+    log("INFO", "generated new fp:", fp)
     return fp
 
 
@@ -96,7 +113,7 @@ def get_jwt(force=False):
         if not force and _jwt and (_jwt_exp - now) > REFRESH_MARGIN * 1000:
             return _jwt
         _jwt, _jwt_exp = _bootstrap()
-        log(f"JWT refreshed, exp in {int((_jwt_exp - now) / 1000)}s")
+        log("DEBUG", "JWT refreshed, exp in " + str(int((_jwt_exp - now) / 1000)) + "s")
         return _jwt
 
 
@@ -117,7 +134,7 @@ def upstream_chat(payload):
     for f in ("max_tokens", "max_completion_tokens"):
         v = payload.get(f)
         if isinstance(v, int) and v > MAX_OUTPUT_TOKENS:
-            log(f"clamp {f} {v} -> {MAX_OUTPUT_TOKENS}")
+            log("DEBUG", "clamp " + f + " " + str(v) + " -> " + str(MAX_OUTPUT_TOKENS))
             payload[f] = MAX_OUTPUT_TOKENS
 
     def _do(jwt):
@@ -136,7 +153,7 @@ def upstream_chat(payload):
         return _do(get_jwt())
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            log("got", e.code, "-> refresh JWT retry")
+            log("INFO", "got " + str(e.code) + " -> refresh JWT retry")
             return _do(get_jwt(force=True))
         raise
 
@@ -219,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except Exception as e:
-            log("stream relay ended", repr(e))
+            log("DEBUG", "stream relay ended", repr(e))
         finally:
             resp.close()
 
@@ -228,12 +245,12 @@ def main():
     get_fp()
     try:
         get_jwt()
-        log("startup JWT ok")
+        log("INFO", "startup JWT ok")
     except Exception as e:
-        log("startup bootstrap failed (will retry on request):", e)
+        log("ERROR", "startup bootstrap failed (will retry on request):", e)
     srv = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     auth_status = "ON" if LOCAL_KEY else "OFF"
-    log(f"mimo-code-proxy on http://{LISTEN_HOST}:{LISTEN_PORT}  auth={auth_status}")
+    log("INFO", "mimo-code-proxy on http://" + LISTEN_HOST + ":" + str(LISTEN_PORT) + "  auth=" + auth_status)
     srv.serve_forever()
 
 
