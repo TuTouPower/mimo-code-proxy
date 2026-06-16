@@ -36,6 +36,9 @@ MIMO_GUARD_TEXT = (
 _jwt = None
 _jwt_exp = 0
 _lock = threading.Lock()
+_health_ok = False
+_health_ts = 0
+_HEALTH_CACHE_S = 30
 
 
 LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
@@ -179,6 +182,22 @@ MODELS_RESP = {
 }
 
 
+def check_health():
+    global _health_ok, _health_ts
+    now = time.time()
+    if _health_ok and (now - _health_ts) < _HEALTH_CACHE_S:
+        return True, None
+    try:
+        get_jwt()
+        _health_ok = True
+        _health_ts = now
+        return True, None
+    except Exception as e:
+        _health_ok = False
+        _health_ts = now
+        return False, str(e)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -205,7 +224,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(401, {"error": {"message": "invalid key"}})
             return self._json(200, MODELS_RESP)
         if np == "/health":
-            return self._json(200, {"status": "ok"})
+            ok, err = check_health()
+            if ok:
+                return self._json(200, {"status": "ok", "upstream": "ok"})
+            return self._json(
+                503,
+                {"status": "degraded", "upstream": "down", "error": err},
+            )
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):

@@ -66,6 +66,31 @@ class TestJwtDecode(unittest.TestCase):
         self.assertAlmostEqual(result, now + 3600 * 1000, delta=5000)
 
 
+class TestHealthCheck(unittest.TestCase):
+    def setUp(self):
+        proxy._health_ok = False
+        proxy._health_ts = 0
+
+    def test_check_health_ok(self):
+        with patch("mimo_code_proxy.get_jwt", return_value="mock-jwt"):
+            ok, err = proxy.check_health()
+            self.assertTrue(ok)
+            self.assertIsNone(err)
+
+    def test_check_health_degraded(self):
+        with patch("mimo_code_proxy.get_jwt", side_effect=Exception("boom")):
+            ok, err = proxy.check_health()
+            self.assertFalse(ok)
+            self.assertIn("boom", err)
+
+    def test_health_cache_returns_cached(self):
+        proxy._health_ok = True
+        proxy._health_ts = time.time()
+        ok, err = proxy.check_health()
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+
+
 class TestAuth(unittest.TestCase):
     def _make_handler(self):
         h = MagicMock(spec=proxy.Handler)
@@ -134,12 +159,17 @@ class TestServer(unittest.TestCase):
         )
         return urllib.request.urlopen(req, timeout=10)
 
-    def test_health_returns_ok(self):
-        resp = self._get("/v1/health")
+    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    def test_health_returns_ok(self, _mock):
+        resp = self._get("/health")
         self.assertEqual(resp.status, 200)
+        data = json.loads(resp.read())
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["upstream"], "ok")
 
-    def test_health_no_auth_needed(self):
-        resp = self._get("/v1/health")
+    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    def test_health_no_auth_needed(self, _mock):
+        resp = self._get("/health")
         data = json.loads(resp.read())
         self.assertEqual(data["status"], "ok")
 
@@ -277,7 +307,8 @@ class TestPathCompatibility(unittest.TestCase):
     def _url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
 
-    def test_health_no_v1_prefix(self):
+    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    def test_health_no_v1_prefix(self, _mock):
         req = urllib.request.Request(self._url("/health"))
         resp = urllib.request.urlopen(req, timeout=10)
         self.assertEqual(resp.status, 200)
