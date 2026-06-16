@@ -253,6 +253,8 @@ def make_handler(balancer, api_key):
         }
     ).encode()
 
+    ANTHROPIC_MSG_RESP_ID = "msg_" + uuid.uuid4().hex[:24]
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -275,33 +277,29 @@ def make_handler(balancer, api_key):
             np = normalize_path(self.path)
             if np == "/models":
                 if not self._auth_ok():
-                    return self._respond(
-                        401, b'{"error":{"message":"invalid key"}}'
-                    )
+                    return self._respond(401, b'{"error":{"message":"invalid key"}}')
                 return self._respond(200, MODELS_RESP)
             if np == "/health":
                 req_id = new_req_id()
                 log("DEBUG", "GET health", req_id=req_id)
                 return self._respond(
                     200,
-                    json.dumps(
-                        {
-                            "status": "ok",
-                            "backends": len(balancer),
-                        }
-                    ).encode(),
+                    json.dumps({"status": "ok", "backends": len(balancer)}).encode(),
                 )
             self._respond(404, b'{"error":{"message":"not found"}}')
 
         def do_POST(self):
             req_id = new_req_id()
             log("DEBUG", "POST", self.path, req_id=req_id)
-            if normalize_path(self.path) != "/chat/completions":
+
+            np = normalize_path(self.path)
+            is_anthropic = np == "/messages"
+            is_openai = np == "/chat/completions"
+
+            if not is_openai and not is_anthropic:
                 return self._respond(404, b'{"error":{"message":"not found"}}')
             if not self._auth_ok():
-                return self._respond(
-                    401, b'{"error":{"message":"invalid key"}}'
-                )
+                return self._respond(401, b'{"error":{"message":"invalid key"}}')
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 payload = json.loads(self.rfile.read(n).decode())
@@ -319,101 +317,145 @@ def make_handler(balancer, api_key):
                     break
                 tried.add(be.name)
                 tag = be.name
+
+                oai_payload = payload if is_openai else anthropic_to_openai(payload)
+
                 try:
-                    resp = be.chat(payload, req_id=req_id)
+                    resp = be.chat(oai_payload, req_id=req_id)
                 except urllib.error.HTTPError as e:
                     last_error = e
-                    log(
-                        "WARN",
-                        f"upstream HTTP {e.code}",
-                        req_id=req_id,
-                        backend=tag,
-                    )
+                    log("WARN", f"upstream HTTP {e.code}", req_id=req_id, backend=tag)
                     continue
                 except Exception as e:
                     last_error = e
-                    log(
-                        "WARN",
-                        f"upstream error: {e}",
-                        req_id=req_id,
-                        backend=tag,
-                    )
+                    log("WARN", f"upstream error: {e}", req_id=req_id, backend=tag)
                     continue
 
                 # Success - relay response
                 try:
-                    is_stream = payload.get("stream", False)
+                    is_stream = oai_payload.get("stream", False)
                     self.send_response(200)
-                    content_type = resp.headers.get("Content-Type", "application/json")
-                    self.send_header("Content-Type", content_type)
-                    if not is_stream:
-                        body = resp.read()
-                        self.send_header("Content-Length", str(len(body)))
+
+                    if is_anthropic:
+                        self.send_header("Content-Type", "text/event-stream" if is_stream else "application/json")
                         self.send_header("Connection", "close")
                         self.end_headers()
-                        self.wfile.write(body)
-                        log(
-                            "DEBUG",
-                            "non-stream response",
-                            len(body),
-                            "bytes",
-                            req_id=req_id,
-                            backend=tag,
-                        )
-                    else:
-                        self.send_header("Connection", "close")
-                        self.end_headers()
-                        total = 0
-                        t0 = time.time()
-                        done_seen = False
-                        try:
-                            while True:
-                                chunk = resp.read(1024)
-                                if not chunk:
-                                    break
-                                total += len(chunk)
-                                self.wfile.write(chunk)
+
+                        if not is_stream:
+                            oai_body = json.loads(resp.read().decode())
+                            choice = (oai_body.get("choices") or [{}])[0]
+                            message = choice.get("message") or {}
+                            content = message.get("content") or ""
+                            stop = choice.get("finish_reason", "end_turn")
+                            if stop == "stop":
+                                stop = "end_turn"
+                            result = {
+                                "id": "msg_" + uuid.uuid4().hex[:24],
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": content}],
+                                "model": oai_body.get("model", UPSTREAM_MODEL),
+                                "stop_reason": stop,
+                                "usage": {"input_tokens": 0, "output_tokens": oai_body.get("usage", {}).get("completion_tokens", 0)},
+                            }
+                            self.wfile.write(json.dumps(result, ensure_ascii=False).encode())
+                            log("DEBUG", "anthropic non-stream response", len(content), "chars", req_id=req_id, backend=tag)
+                        else:
+                            model = payload.get("model", UPSTREAM_MODEL)
+                            msg_id = "msg_" + uuid.uuid4().hex[:24]
+                            def _emit(events):
+                                for ev in events:
+                                    self.wfile.write(f"event: {ev['type']}\n".encode())
+                                    self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
                                 self.wfile.flush()
-                                if b"[DONE]" in chunk:
-                                    done_seen = True
-                        except Exception as e:
-                            log(
-                                "DEBUG",
-                                "stream relay ended",
-                                repr(e),
-                                req_id=req_id,
-                                backend=tag,
-                            )
-                        elapsed = int((time.time() - t0) * 1000)
-                        log(
-                            "DEBUG",
-                            "stream done",
-                            total,
-                            "bytes",
-                            elapsed,
-                            "ms",
-                            f"DONE={done_seen}",
-                            req_id=req_id,
-                            backend=tag,
-                        )
+                            _emit([{
+                                "type": "message_start",
+                                "message": {"id": msg_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "usage": {"input_tokens": 0, "output_tokens": 0}},
+                            }])
+                            total = 0
+                            t0 = time.time()
+                            done_seen = False
+                            block_started = False
+                            try:
+                                buf = b""
+                                while True:
+                                    chunk = resp.read(1024)
+                                    if not chunk:
+                                        break
+                                    buf += chunk
+                                    while b"\n" in buf:
+                                        line, buf = buf.split(b"\n", 1)
+                                        for ev in openai_sse_to_anthropic_sse_line(line):
+                                            if ev["type"] == "content_block_start" and not block_started:
+                                                block_started = True
+                                                _emit([ev])
+                                            elif ev["type"] == "content_block_delta":
+                                                total += len(ev["delta"]["text"])
+                                                _emit([ev])
+                                            elif ev["type"] in ("content_block_stop", "message_delta", "message_stop"):
+                                                done_seen = True
+                                                _emit([ev])
+                            except Exception as e:
+                                log("DEBUG", "anthropic stream relay ended", repr(e), req_id=req_id, backend=tag)
+                            if not done_seen:
+                                _emit([
+                                    {"type": "content_block_stop", "index": 0},
+                                    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": total}},
+                                    {"type": "message_stop"},
+                                ])
+                            elapsed = int((time.time() - t0) * 1000)
+                            log("DEBUG", "anthropic stream done", total, "chars", elapsed, "ms", f"DONE={done_seen}", req_id=req_id, backend=tag)
+                    else:
+                        self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
+                        if not is_stream:
+                            body = resp.read()
+                            self.send_header("Content-Length", str(len(body)))
+                            self.end_headers()
+                            self.wfile.write(body)
+                            log("DEBUG", "non-stream response", len(body), "bytes", req_id=req_id, backend=tag)
+                        else:
+                            self.send_header("Connection", "close")
+                            self.end_headers()
+                            total = 0
+                            t0 = time.time()
+                            done_seen = False
+                            try:
+                                while True:
+                                    chunk = resp.read(1024)
+                                    if not chunk:
+                                        break
+                                    total += len(chunk)
+                                    self.wfile.write(chunk)
+                                    self.wfile.flush()
+                                    if b"[DONE]" in chunk:
+                                        done_seen = True
+                            except Exception as e:
+                                log("DEBUG", "stream relay ended", repr(e), req_id=req_id, backend=tag)
+                            elapsed = int((time.time() - t0) * 1000)
+                            log("DEBUG", "stream done", total, "bytes", elapsed, "ms", f"DONE={done_seen}", req_id=req_id, backend=tag)
                 finally:
                     resp.close()
                 return
 
             # All backends failed
-            if isinstance(last_error, urllib.error.HTTPError):
-                body = last_error.read().decode(errors="replace")
-                try:
-                    obj = json.loads(body)
-                except Exception:
-                    obj = {"error": {"message": body[:500], "code": last_error.code}}
-                log("DEBUG", "upstream HTTPError", last_error.code, req_id=req_id)
-                return self._respond(last_error.code, json.dumps(obj).encode())
-
-            log("ERROR", "upstream fatal", repr(last_error), req_id=req_id)
-            return self._respond(
-                502, json.dumps({"error": {"message": str(last_error)}}).encode()
-            )
+            if is_anthropic:
+                self._respond(502, json.dumps({
+                    "type": "error",
+                    "error": {"type": "api_error", "message": f"all backends failed: {last_error}"},
+                }).encode())
+            else:
+                if isinstance(last_error, urllib.error.HTTPError):
+                    body = last_error.read().decode(errors="replace")
+                    try:
+                        obj = json.loads(body)
+                    except Exception:
+                        obj = {"error": {"message": body[:500], "code": last_error.code}}
+                    log("DEBUG", "upstream HTTPError", last_error.code, req_id=req_id)
+                    return self._respond(last_error.code, json.dumps(obj).encode())
+                log("ERROR", "upstream fatal", repr(last_error), req_id=req_id)
+                return self._respond(
+                    502, json.dumps({"error": {"message": str(last_error)}}).encode(),
+                )
 
     return Handler
 
@@ -427,6 +469,93 @@ def normalize_path(path):
     if p.startswith("/v1/"):
         return p[3:]
     return p
+
+
+# ---------------------------------------------------------------------------
+# Anthropic Messages API 格式转换
+# ---------------------------------------------------------------------------
+def anthropic_to_openai(req):
+    """Anthropic /v1/messages 请求体 → OpenAI /v1/chat/completions 请求体。"""
+    oai = {"model": req.get("model", UPSTREAM_MODEL)}
+    if req.get("stream"):
+        oai["stream"] = True
+    if "max_tokens" in req:
+        oai["max_tokens"] = req["max_tokens"]
+    if "temperature" in req:
+        oai["temperature"] = req["temperature"]
+    if "top_p" in req:
+        oai["top_p"] = req["top_p"]
+
+    messages = []
+    system = req.get("system")
+    if isinstance(system, str) and system:
+        messages.append({"role": "system", "content": system})
+    elif isinstance(system, list):
+        for block in system:
+            if block.get("type") == "text":
+                messages.append({"role": "system", "content": block.get("text", "")})
+
+    for msg in req.get("messages", []):
+        messages.append(msg)
+
+    oai["messages"] = messages
+    return oai
+
+
+def build_anthropic_sse(events):
+    """将 Anthropic SSE 事件列表拼成 bytes 输出。"""
+    out = []
+    for ev in events:
+        out.append(f"event: {ev['type']}\n".encode())
+        out.append(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+    return b"".join(out)
+
+
+def openai_sse_to_anthropic_sse_line(oai_chunk_line):
+    """解析一行 OpenAI SSE chunk → Anthropic SSE 事件列表。
+
+    Input: b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+    Output: list of dict events (empty if nothing to emit)
+    """
+    if not oai_chunk_line.startswith(b"data: "):
+        return []
+    payload_str = oai_chunk_line[6:].strip()
+    if payload_str == "[DONE]":
+        return []
+
+    try:
+        payload = json.loads(payload_str)
+    except Exception:
+        return []
+
+    choice = (payload.get("choices") or [{}])[0]
+    delta = choice.get("delta") or {}
+    finish = choice.get("finish_reason")
+
+    events = []
+    if "role" in delta and delta["role"] == "assistant":
+        events.append({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+    elif "content" in delta and delta["content"]:
+        events.append({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": delta["content"]},
+        })
+
+    if finish:
+        events.append({"type": "content_block_stop", "index": 0})
+        events.append({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 0},
+        })
+        events.append({"type": "message_stop"})
+
+    return events
 
 
 def load_config(path):

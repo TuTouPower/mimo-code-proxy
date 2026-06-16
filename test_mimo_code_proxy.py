@@ -465,6 +465,214 @@ class TestServer(unittest.TestCase):
             self.assertIn(b"[DONE]", body)
 
 
+class TestAnthropicMessages(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fp_dir = "/tmp/test_mimo_fp_anthropic"
+        os.makedirs(cls.fp_dir, exist_ok=True)
+        for f in os.listdir(cls.fp_dir):
+            if f.startswith("fp_"):
+                os.remove(os.path.join(cls.fp_dir, f))
+
+        be = proxy.MimoBackend("be1", None, cls.fp_dir)
+        be.fingerprint = "test-fp-anth"
+        be.jwt = "test-jwt-anth"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        cls.backends = [be]
+        cls.balancer = proxy.RoundRobin(cls.backends)
+        handler_cls = proxy.make_handler(cls.balancer, "sk-test-key")
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        import shutil
+        if os.path.exists(cls.fp_dir):
+            shutil.rmtree(cls.fp_dir)
+
+    def _url(self, path):
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def _post(self, path, body, headers=None):
+        headers = dict(headers or {})
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            self._url(path), data=data, headers=headers, method="POST"
+        )
+        return urllib.request.urlopen(req, timeout=10)
+
+    def test_convert_anthropic_to_openai_basic(self):
+        req = {
+            "model": "mimo-auto",
+            "max_tokens": 100,
+            "system": "You are helpful.",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        oai = proxy.anthropic_to_openai(req)
+        self.assertEqual(oai["model"], "mimo-auto")
+        self.assertEqual(oai["max_tokens"], 100)
+        self.assertEqual(oai["messages"][0]["role"], "system")
+        self.assertEqual(oai["messages"][0]["content"], "You are helpful.")
+        self.assertEqual(oai["messages"][1]["role"], "user")
+        self.assertEqual(oai["messages"][1]["content"], "hi")
+
+    def test_convert_anthropic_multimodal_content(self):
+        req = {
+            "model": "mimo-auto",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is this?"},
+                        {"type": "image", "source": {"type": "base64", "data": "abc"}},
+                    ],
+                }
+            ],
+        }
+        oai = proxy.anthropic_to_openai(req)
+        content = oai["messages"][0]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(content[0]["text"], "What is this?")
+
+    def test_convert_anthropic_to_openai_stream(self):
+        req = {
+            "model": "mimo-auto",
+            "max_tokens": 100,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        oai = proxy.anthropic_to_openai(req)
+        self.assertTrue(oai.get("stream"))
+
+    def test_anthropic_response_format(self):
+        resp = {
+            "id": "msg_xxx",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello"}],
+            "model": "mimo-auto",
+            "stop_reason": "end_turn",
+        }
+        body = json.dumps(resp).encode()
+        result = json.loads(body)
+        self.assertEqual(result["type"], "message")
+        self.assertEqual(result["role"], "assistant")
+        self.assertEqual(result["content"][0]["type"], "text")
+        self.assertEqual(result["stop_reason"], "end_turn")
+
+    def test_anthropic_stream_event_format(self):
+        events = [
+            {"type": "message_start", "message": {"id": "msg_xxx", "type": "message", "role": "assistant", "model": "mimo-auto", "content": [], "stop_reason": None}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}},
+            {"type": "message_stop"},
+        ]
+        result = proxy.build_anthropic_sse(events)
+        self.assertIn(b"event: message_start", result)
+        self.assertIn(b"event: content_block_delta", result)
+        self.assertIn(b"event: message_stop", result)
+
+    def test_server_anthropic_messages_endpoint(self):
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.read.return_value = json.dumps({
+            "choices": [{"message": {"content": "hello from upstream"}}],
+        }).encode()
+
+        with patch.object(self.backends[0], "chat", return_value=mock_resp):
+            resp = self._post(
+                "/v1/messages",
+                {
+                    "model": "mimo-auto",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                {"Authorization": "Bearer sk-test-key"},
+            )
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read())
+            self.assertEqual(data["type"], "message")
+            self.assertEqual(data["role"], "assistant")
+            self.assertEqual(data["stop_reason"], "end_turn")
+            self.assertIn("content", data)
+
+    def test_server_anthropic_stream_endpoint(self):
+        oai_chunks = [
+            b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        reads = iter(oai_chunks)
+
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "text/event-stream"}
+        def _read(n=1024):
+            try:
+                return next(reads)
+            except StopIteration:
+                return b""
+        mock_resp.read = _read
+
+        with patch.object(self.backends[0], "chat", return_value=mock_resp):
+            resp = self._post(
+                "/v1/messages",
+                {
+                    "model": "mimo-auto",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                {"Authorization": "Bearer sk-test-key"},
+            )
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers.get("Content-Type"), "text/event-stream")
+            body = resp.read()
+            self.assertIn(b"event: message_start", body)
+            self.assertIn(b"event: content_block_delta", body)
+            self.assertIn(b"event: message_stop", body)
+
+    def test_server_anthropic_with_system(self):
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.read.return_value = json.dumps({
+            "choices": [{"message": {"content": "ok"}}],
+        }).encode()
+
+        with patch.object(self.backends[0], "chat", return_value=mock_resp):
+            resp = self._post(
+                "/v1/messages",
+                {
+                    "model": "mimo-auto",
+                    "max_tokens": 100,
+                    "system": "You are a bot.",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                {"Authorization": "Bearer sk-test-key"},
+            )
+            self.assertEqual(resp.status, 200)
+
+    def test_server_anthropic_404_on_unknown_post(self):
+        try:
+            self._post(
+                "/v1/something_else",
+                {"model": "mimo-auto", "messages": []},
+                {"Authorization": "Bearer sk-test-key"},
+            )
+            self.fail("expected 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+
+
 class TestPathNormalization(unittest.TestCase):
     def test_models_no_v1(self):
         self.assertEqual(proxy.normalize_path("/models"), "/models")
