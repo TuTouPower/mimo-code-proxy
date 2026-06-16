@@ -117,6 +117,14 @@ def get_jwt(force=False):
         return _jwt
 
 
+def normalize_path(path):
+    """去掉查询串和尾斜杠，剥掉可选 /v1 前缀，返回精确末段。"""
+    p = path.split("?")[0].rstrip("/")
+    if p.startswith("/v1/"):
+        return p[3:]  # 去掉 /v1，保留 /models 或 /chat/completions
+    return p
+
+
 def upstream_chat(payload):
     payload = dict(payload)
     payload["model"] = UPSTREAM_MODEL
@@ -191,17 +199,17 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        path = self.path.rstrip("/")
-        if path.endswith("/models"):
+        np = normalize_path(self.path)
+        if np == "/models":
             if not self._auth_ok():
                 return self._json(401, {"error": {"message": "invalid key"}})
             return self._json(200, MODELS_RESP)
-        if path.endswith("/health"):
+        if np == "/health":
             return self._json(200, {"status": "ok"})
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self):
-        if "/chat/completions" not in self.path:
+        if normalize_path(self.path) != "/chat/completions":
             return self._json(404, {"error": {"message": "not found"}})
         if not self._auth_ok():
             return self._json(401, {"error": {"message": "invalid key"}})

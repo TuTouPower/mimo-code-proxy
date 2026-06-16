@@ -229,6 +229,80 @@ class TestServer(unittest.TestCase):
         self.assertEqual(resp.status, 200)
 
 
+class TestPathNormalization(unittest.TestCase):
+    def test_models_no_v1(self):
+        self.assertEqual(proxy.normalize_path("/models"), "/models")
+
+    def test_models_with_v1(self):
+        self.assertEqual(proxy.normalize_path("/v1/models"), "/models")
+
+    def test_chat_no_v1(self):
+        self.assertEqual(proxy.normalize_path("/chat/completions"), "/chat/completions")
+
+    def test_chat_with_v1(self):
+        self.assertEqual(proxy.normalize_path("/v1/chat/completions"), "/chat/completions")
+
+    def test_chat_with_query_string(self):
+        self.assertEqual(
+            proxy.normalize_path("/v1/chat/completions?foo=bar"),
+            "/chat/completions",
+        )
+
+    def test_trailing_slash_models(self):
+        self.assertEqual(proxy.normalize_path("/v1/models/"), "/models")
+
+    def test_trailing_slash_chat(self):
+        self.assertEqual(
+            proxy.normalize_path("/chat/completions/"),
+            "/chat/completions",
+        )
+
+
+class TestPathCompatibility(unittest.TestCase):
+    """集成测试：不带 /v1 前缀的路径也能命中。"""
+
+    @classmethod
+    def setUpClass(cls):
+        proxy.LOCAL_KEY = ""
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _url(self, path):
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def test_health_no_v1_prefix(self):
+        req = urllib.request.Request(self._url("/health"))
+        resp = urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(resp.status, 200)
+
+    def test_models_no_v1_prefix(self):
+        req = urllib.request.Request(self._url("/models"))
+        resp = urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(resp.status, 200)
+
+    @patch("mimo_code_proxy.get_jwt", return_value="mock-jwt")
+    @patch("mimo_code_proxy.upstream_chat")
+    def test_chat_no_v1_prefix(self, mock_chat, _mock_jwt):
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.read.return_value = b'{"choices":[]}'
+        mock_chat.return_value = mock_resp
+        resp = urllib.request.urlopen(urllib.request.Request(
+            self._url("/chat/completions"),
+            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        ), timeout=10)
+        self.assertEqual(resp.status, 200)
+
+
 class TestUpstreamChatLogic(unittest.TestCase):
     def setUp(self):
         proxy._jwt = None
