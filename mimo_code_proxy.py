@@ -34,7 +34,6 @@ MIMO_GUARD_TEXT = (
 )
 
 MIMO_MAX_RETRY = int(os.environ.get("MIMO_MAX_RETRY", "3"))
-REFRESH_MARGIN = 300
 
 _active_client = None
 _active_jwt = None
@@ -99,11 +98,6 @@ def _persist_fp(fp):
         os.chmod(CLIENT_FILE, 0o600)
     except Exception as e:
         log("WARN", "cannot persist fingerprint", e)
-
-
-def _fingerprint():
-    global _active_client, _active_jwt, _active_jwt_exp
-    return _active_client, _active_jwt, _active_jwt_exp
 
 
 def _replace_fingerprint(req_id=None):
@@ -189,8 +183,11 @@ def upstream_chat(payload, req_id=None):
             log("WARN", "bootstrap failed retry=" + str(retry) + "/" + str(MIMO_MAX_RETRY), repr(e), req_id=req_id)
             if retry >= MIMO_MAX_RETRY:
                 raise RuntimeError("bootstrap exhausted: " + str(e))
-            with _fp_lock:
-                _replace_fingerprint(req_id=req_id)
+            try:
+                with _fp_lock:
+                    _replace_fingerprint(req_id=req_id)
+            except Exception as e2:
+                log("WARN", "fingerprint replace failed", repr(e2), req_id=req_id)
             continue
 
         try:
@@ -213,17 +210,21 @@ def upstream_chat(payload, req_id=None):
             log("WARN", "upstream HTTP " + str(e.code) + " retry=" + str(retry) + "/" + str(MIMO_MAX_RETRY), req_id=req_id)
             if retry >= MIMO_MAX_RETRY:
                 raise
-            with _fp_lock:
-                _replace_fingerprint(req_id=req_id)
+            try:
+                with _fp_lock:
+                    _replace_fingerprint(req_id=req_id)
+            except Exception as e2:
+                log("WARN", "fingerprint replace failed", repr(e2), req_id=req_id)
         except Exception as e:
             last_error = e
             log("WARN", "upstream error retry=" + str(retry) + "/" + str(MIMO_MAX_RETRY), repr(e), req_id=req_id)
             if retry >= MIMO_MAX_RETRY:
                 raise
-            with _fp_lock:
-                _replace_fingerprint(req_id=req_id)
-
-    raise last_error
+            try:
+                with _fp_lock:
+                    _replace_fingerprint(req_id=req_id)
+            except Exception as e2:
+                log("WARN", "fingerprint replace failed", repr(e2), req_id=req_id)
 
 
 def normalize_path(path):
