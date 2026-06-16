@@ -1,0 +1,14 @@
+{
+    "listen": {
+        "host": "0.0.0.0",
+        "port": 8788
+    },
+    "api_key": "sk-mimo-change-me",
+    "backends": [
+        {"name": "sg-01", "proxy": "http://127.0.0.1:7890"},
+        {"name": "jp-01", "proxy": "http://127.0.0.1:7891"},
+        {"name": "us-01", "proxy": "http://127.0.0.1:7892"},
+        {"name": "direct", "proxy": null}
+    ],
+    "fingerprint_dir": "/data/mimo_fingerprints"
+}

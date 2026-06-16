@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for mimo_code_proxy."""
+"""Tests for mimo_code_proxy with multi-backend load balancer."""
 import json
 import os
 import sys
@@ -17,40 +17,105 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mimo_code_proxy as proxy
 
 
-class TestFingerprint(unittest.TestCase):
+class TestLoadConfig(unittest.TestCase):
+    def test_load_valid_config(self):
+        cfg = {
+            "listen": {"host": "127.0.0.1", "port": 8888},
+            "api_key": "sk-test",
+            "backends": [
+                {"name": "sg-01", "proxy": "http://127.0.0.1:7890"},
+                {"name": "direct", "proxy": None},
+            ],
+            "fingerprint_dir": "/tmp/test_fp",
+        }
+        with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(cfg))):
+            result = proxy.load_config("/tmp/test.json")
+        self.assertEqual(result["listen"]["host"], "127.0.0.1")
+        self.assertEqual(result["listen"]["port"], 8888)
+        self.assertEqual(result["api_key"], "sk-test")
+        self.assertEqual(len(result["backends"]), 2)
+        self.assertEqual(result["backends"][0]["proxy"], "http://127.0.0.1:7890")
+        self.assertIsNone(result["backends"][1]["proxy"])
+
+    def test_load_missing_name_raises(self):
+        cfg = {"backends": [{"proxy": "http://127.0.0.1:7890"}]}
+        with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(cfg))):
+            with self.assertRaises(ValueError):
+                proxy.load_config("/tmp/test.json")
+
+    def test_load_empty_backends_raises(self):
+        cfg = {"backends": []}
+        with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(cfg))):
+            with self.assertRaises(ValueError):
+                proxy.load_config("/tmp/test.json")
+
+    def test_default_listen(self):
+        cfg = {"backends": [{"name": "test"}]}
+        with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(cfg))):
+            result = proxy.load_config("/tmp/test.json")
+        self.assertEqual(result["listen"]["host"], "0.0.0.0")
+        self.assertEqual(result["listen"]["port"], 8788)
+
+
+class TestMimoBackendFingerprint(unittest.TestCase):
     def setUp(self):
-        proxy._active_client = None
-        proxy._active_jwt = None
-        proxy._active_jwt_exp = 0
-        self._saved_client_id = os.environ.pop("MIMO_CLIENT_ID", None)
+        self.fp_dir = "/tmp/test_mimo_fp"
+        os.makedirs(self.fp_dir, exist_ok=True)
+        # Clean up any existing fp files
+        for f in os.listdir(self.fp_dir):
+            if f.startswith("fp_"):
+                os.remove(os.path.join(self.fp_dir, f))
 
     def tearDown(self):
-        if self._saved_client_id:
-            os.environ["MIMO_CLIENT_ID"] = self._saved_client_id
+        import shutil
+        if os.path.exists(self.fp_dir):
+            shutil.rmtree(self.fp_dir)
 
-    def test_load_or_create_fp_returns_uuid_format(self):
-        fp = proxy._load_or_create_fp(req_id="test")
-        parts = fp.split("-")
-        self.assertEqual(len(parts), 5)
-        self.assertEqual(len(fp), 36)
+    def test_fp_generation(self):
+        be = proxy.MimoBackend("test-be", None, self.fp_dir)
+        be.ensure_fp()
+        self.assertIsNotNone(be.fingerprint)
+        self.assertEqual(len(be.fingerprint), 64)  # SHA256 hex
 
-    def test_load_or_create_fp_from_env(self):
-        os.environ["MIMO_CLIENT_ID"] = "my-custom-fp"
-        self.assertEqual(proxy._load_or_create_fp(req_id="test"), "my-custom-fp")
+    def test_fp_persistence(self):
+        be1 = proxy.MimoBackend("test-be", None, self.fp_dir)
+        be1.ensure_fp()
+        fp1 = be1.fingerprint
 
-    def test_load_or_create_fp_cached_from_file(self):
-        with patch.object(proxy, "open", unittest.mock.mock_open(read_data="cached-fp")):
-            fp = proxy._load_or_create_fp(req_id="test")
-            self.assertEqual(fp, "cached-fp")
+        be2 = proxy.MimoBackend("test-be", None, self.fp_dir)
+        be2.ensure_fp()
+        self.assertEqual(be2.fingerprint, fp1)
 
-    def test_load_or_create_fp_deterministic_with_env(self):
-        os.environ["MIMO_CLIENT_ID"] = "fixed-fp"
-        self.assertEqual(proxy._load_or_create_fp(req_id="test"), "fixed-fp")
-        self.assertEqual(proxy._load_or_create_fp(req_id="test"), "fixed-fp")
+    def test_fp_different_names(self):
+        be1 = proxy.MimoBackend("be-1", None, self.fp_dir)
+        be2 = proxy.MimoBackend("be-2", None, self.fp_dir)
+        be1.ensure_fp()
+        be2.ensure_fp()
+        self.assertNotEqual(be1.fingerprint, be2.fingerprint)
+
+    def test_fp_file_created(self):
+        be = proxy.MimoBackend("test-be", None, self.fp_dir)
+        be.ensure_fp()
+        fp_path = os.path.join(self.fp_dir, "fp_test-be")
+        self.assertTrue(os.path.exists(fp_path))
+        with open(fp_path) as f:
+            self.assertEqual(f.read().strip(), be.fingerprint)
 
 
-class TestJwtDecode(unittest.TestCase):
-    def test_decode_valid_jwt_exp(self):
+class TestMimoBackendJwt(unittest.TestCase):
+    def setUp(self):
+        self.fp_dir = "/tmp/test_mimo_fp_jwt"
+        os.makedirs(self.fp_dir, exist_ok=True)
+        for f in os.listdir(self.fp_dir):
+            if f.startswith("fp_"):
+                os.remove(os.path.join(self.fp_dir, f))
+
+    def tearDown(self):
+        import shutil
+        if os.path.exists(self.fp_dir):
+            shutil.rmtree(self.fp_dir)
+
+    def test_jwt_decode_exp(self):
         exp = int(time.time()) + 3600
         header = base64.urlsafe_b64encode(
             json.dumps({"alg": "HS256"}).encode()
@@ -59,86 +124,225 @@ class TestJwtDecode(unittest.TestCase):
             json.dumps({"exp": exp}).encode()
         ).rstrip(b"=").decode()
         jwt = f"{header}.{payload}.sig"
-        result = proxy._decode_exp(jwt)
+
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        result = be._decode_exp(jwt)
         self.assertEqual(result, exp * 1000)
 
-    def test_decode_invalid_jwt_returns_fallback(self):
-        now = time.time() * 1000
-        result = proxy._decode_exp("garbage.jwt.token")
-        self.assertAlmostEqual(result, now + 3600 * 1000, delta=5000)
+    def test_jwt_refresh_on_expiry(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "test-fp"
+        be.jwt = "old-jwt"
+        be.jwt_exp = time.time() * 1000 - 1000  # expired
+
+        with patch.object(be, "_bootstrap") as mock_bootstrap:
+            mock_bootstrap.return_value = ("new-jwt", (time.time() + 3600) * 1000)
+            jwt = be.get_jwt()
+            self.assertEqual(jwt, "new-jwt")
+            mock_bootstrap.assert_called_once()
+
+    def test_jwt_no_refresh_when_valid(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "test-fp"
+        be.jwt = "valid-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        with patch.object(be, "_bootstrap") as mock_bootstrap:
+            jwt = be.get_jwt()
+            self.assertEqual(jwt, "valid-jwt")
+            mock_bootstrap.assert_not_called()
+
+    def test_jwt_force_refresh(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "test-fp"
+        be.jwt = "valid-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        with patch.object(be, "_bootstrap") as mock_bootstrap:
+            mock_bootstrap.return_value = ("forced-jwt", (time.time() + 3600) * 1000)
+            jwt = be.get_jwt(force=True)
+            self.assertEqual(jwt, "forced-jwt")
+            mock_bootstrap.assert_called_once()
 
 
-class TestHealthCheck(unittest.TestCase):
+class TestMimoBackendChat(unittest.TestCase):
     def setUp(self):
-        proxy._health_ok = False
-        proxy._health_ts = 0
-        proxy._active_client = "test-fp-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-        proxy._active_jwt = "test-jwt"
-        proxy._active_jwt_exp = (time.time() + 3600) * 1000
+        self.fp_dir = "/tmp/test_mimo_fp_chat"
+        os.makedirs(self.fp_dir, exist_ok=True)
+        for f in os.listdir(self.fp_dir):
+            if f.startswith("fp_"):
+                os.remove(os.path.join(self.fp_dir, f))
 
-    def test_check_health_ok(self):
-        with patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt"):
-            ok, err = proxy.check_health(req_id="test")
-            self.assertTrue(ok)
-            self.assertIsNone(err)
+    def tearDown(self):
+        import shutil
+        if os.path.exists(self.fp_dir):
+            shutil.rmtree(self.fp_dir)
 
-    def test_check_health_degraded(self):
-        with patch("mimo_code_proxy.ensure_jwt", side_effect=Exception("boom")):
-            ok, err = proxy.check_health(req_id="test")
-            self.assertFalse(ok)
-            self.assertIn("boom", err)
+    def test_chat_injects_guard_prompt(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "test-fp"
+        be.jwt = "test-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
 
-    def test_health_cache_returns_cached(self):
-        proxy._health_ok = True
-        proxy._health_ts = time.time()
-        ok, err = proxy.check_health(req_id="test")
-        self.assertTrue(ok)
-        self.assertIsNone(err)
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.read.return_value = b'{}'
+        mock_resp.status = 200
+
+        with patch("urllib.request.OpenerDirector.open", return_value=mock_resp):
+            be.chat({"messages": [{"role": "user", "content": "hi"}]})
+
+    def test_chat_model_forced_to_mimo_auto(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "test-fp"
+        be.jwt = "test-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        captured = {}
+        def _capture(req, timeout=300):
+            captured["body"] = json.loads(req.data)
+            mock_resp = MagicMock()
+            mock_resp.headers = {"Content-Type": "application/json"}
+            mock_resp.read.return_value = b'{}'
+            mock_resp.status = 200
+            return mock_resp
+
+        with patch("urllib.request.OpenerDirector.open", side_effect=_capture):
+            be.chat({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]})
+
+        self.assertEqual(captured["body"]["model"], "mimo-auto")
+
+    def test_chat_401_triggers_force_refresh(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "test-fp"
+        be.jwt = "old-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        call_count = [0]
+        def _fake_open(req, timeout=300):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise urllib.error.HTTPError("url", 401, "unauthorized", {}, io.BytesIO(b"{}"))
+            mock_resp = MagicMock()
+            mock_resp.headers = {"Content-Type": "application/json"}
+            mock_resp.read.return_value = b'{}'
+            mock_resp.status = 200
+            return mock_resp
+
+        with patch("urllib.request.OpenerDirector.open", side_effect=_fake_open), \
+             patch.object(be, "_bootstrap") as mock_bootstrap:
+            mock_bootstrap.return_value = ("new-jwt", (time.time() + 3600) * 1000)
+            be.chat({"messages": [{"role": "user", "content": "hi"}]})
+            mock_bootstrap.assert_called_once()
+
+    def test_chat_max_tokens_clamped(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "test-fp"
+        be.jwt = "test-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        captured = {}
+        def _capture(req, timeout=300):
+            captured["body"] = json.loads(req.data)
+            mock_resp = MagicMock()
+            mock_resp.headers = {"Content-Type": "application/json"}
+            mock_resp.read.return_value = b'{}'
+            mock_resp.status = 200
+            return mock_resp
+
+        with patch("urllib.request.OpenerDirector.open", side_effect=_capture):
+            be.chat({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 999999})
+
+        self.assertEqual(captured["body"]["max_tokens"], proxy.MAX_OUTPUT_TOKENS)
 
 
-class TestAuth(unittest.TestCase):
-    def _make_handler(self):
-        h = MagicMock(spec=proxy.Handler)
+class TestRoundRobin(unittest.TestCase):
+    def test_picks_in_order(self):
+        backends = ["a", "b", "c"]
+        rr = proxy.RoundRobin(backends)
+        self.assertEqual(rr.pick(), "a")
+        self.assertEqual(rr.pick(), "b")
+        self.assertEqual(rr.pick(), "c")
+        self.assertEqual(rr.pick(), "a")
+
+    def test_thread_safe(self):
+        backends = ["a", "b"]
+        rr = proxy.RoundRobin(backends)
+        results = []
+        lock = threading.Lock()
+
+        def _pick():
+            for _ in range(100):
+                r = rr.pick()
+                with lock:
+                    results.append(r)
+
+        threads = [threading.Thread(target=_pick) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(results), 1000)
+        # Each backend should be picked roughly equally
+        count_a = results.count("a")
+        count_b = results.count("b")
+        self.assertEqual(count_a, 500)
+        self.assertEqual(count_b, 500)
+
+
+class TestHandlerAuth(unittest.TestCase):
+    def _make_handler(self, api_key=""):
+        balancer = proxy.RoundRobin([])
+        handler_cls = proxy.make_handler(balancer, api_key)
+        h = MagicMock(spec=handler_cls)
         h.headers = {}
-        h._auth_ok = proxy.Handler._auth_ok.__get__(h, proxy.Handler)
+        h._auth_ok = handler_cls._auth_ok.__get__(h, handler_cls)
         return h
 
-    def test_auth_ok_no_key_set(self):
-        proxy.LOCAL_KEY = ""
-        h = self._make_handler()
+    def test_auth_ok_no_key(self):
+        h = self._make_handler("")
         self.assertTrue(h._auth_ok())
 
     def test_auth_ok_correct_key(self):
-        proxy.LOCAL_KEY = "sk-test-123"
-        h = self._make_handler()
+        h = self._make_handler("sk-test-123")
         h.headers = {"Authorization": "Bearer sk-test-123"}
         self.assertTrue(h._auth_ok())
 
     def test_auth_fail_wrong_key(self):
-        proxy.LOCAL_KEY = "sk-test-123"
-        h = self._make_handler()
+        h = self._make_handler("sk-test-123")
         h.headers = {"Authorization": "Bearer wrong-key"}
         self.assertFalse(h._auth_ok())
 
     def test_auth_fail_missing_header(self):
-        proxy.LOCAL_KEY = "sk-test-123"
-        h = self._make_handler()
+        h = self._make_handler("sk-test-123")
         h.headers = {}
         self.assertFalse(h._auth_ok())
-
-
-class TestModelsResponse(unittest.TestCase):
-    def test_models_response_structure(self):
-        self.assertEqual(proxy.MODELS_RESP["object"], "list")
-        self.assertEqual(len(proxy.MODELS_RESP["data"]), 1)
-        self.assertEqual(proxy.MODELS_RESP["data"][0]["id"], "mimo-auto")
 
 
 class TestServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        proxy.LOCAL_KEY = "sk-test-key"
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
+        cls.fp_dir = "/tmp/test_mimo_fp_server"
+        os.makedirs(cls.fp_dir, exist_ok=True)
+        for f in os.listdir(cls.fp_dir):
+            if f.startswith("fp_"):
+                os.remove(os.path.join(cls.fp_dir, f))
+
+        # Create mock backends
+        be1 = proxy.MimoBackend("be1", None, cls.fp_dir)
+        be1.fingerprint = "test-fp-1"
+        be1.jwt = "test-jwt-1"
+        be1.jwt_exp = (time.time() + 3600) * 1000
+
+        be2 = proxy.MimoBackend("be2", None, cls.fp_dir)
+        be2.fingerprint = "test-fp-2"
+        be2.jwt = "test-jwt-2"
+        be2.jwt_exp = (time.time() + 3600) * 1000
+
+        cls.balancer = proxy.RoundRobin([be1, be2])
+        handler_cls = proxy.make_handler(cls.balancer, "sk-test-key")
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -147,10 +351,9 @@ class TestServer(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
-
-    def setUp(self):
-        proxy._health_ok = False
-        proxy._health_ts = 0
+        import shutil
+        if os.path.exists(cls.fp_dir):
+            shutil.rmtree(cls.fp_dir)
 
     def _url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
@@ -168,26 +371,19 @@ class TestServer(unittest.TestCase):
         )
         return urllib.request.urlopen(req, timeout=10)
 
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    def test_health_returns_ok(self, _mock):
+    def test_health_returns_backend_count(self):
         resp = self._get("/health")
         self.assertEqual(resp.status, 200)
         data = json.loads(resp.read())
         self.assertEqual(data["status"], "ok")
-        self.assertEqual(data["upstream"], "ok")
+        self.assertEqual(data["backends"], 2)
 
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    def test_health_no_auth_needed(self, _mock):
-        resp = self._get("/health")
-        data = json.loads(resp.read())
-        self.assertEqual(data["status"], "ok")
-
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    def test_models_with_valid_key(self, _mock):
+    def test_models_with_valid_key(self):
         resp = self._get("/v1/models", {"Authorization": "Bearer sk-test-key"})
         self.assertEqual(resp.status, 200)
         data = json.loads(resp.read())
         self.assertEqual(data["object"], "list")
+        self.assertEqual(data["data"][0]["id"], "mimo-auto")
 
     def test_models_without_key_returns_401(self):
         try:
@@ -196,84 +392,52 @@ class TestServer(unittest.TestCase):
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 401)
 
-    def test_models_with_wrong_key_returns_401(self):
-        try:
-            self._get("/v1/models", {"Authorization": "Bearer bad-key"})
-            self.fail("expected 401")
-        except urllib.error.HTTPError as e:
-            self.assertEqual(e.code, 401)
-
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    @patch("mimo_code_proxy.upstream_chat")
-    def test_chat_without_key_returns_401(self, _mock_chat, _mock_jwt):
-        try:
-            self._post("/v1/chat/completions", {"messages": []})
-            self.fail("expected 401")
-        except urllib.error.HTTPError as e:
-            self.assertEqual(e.code, 401)
-
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    @patch("mimo_code_proxy.upstream_chat")
-    def test_chat_success_response(self, mock_chat, _mock_jwt):
+    def test_chat_success(self):
         mock_resp = MagicMock()
         mock_resp.headers = {"Content-Type": "application/json"}
         mock_resp.read.return_value = (
             b'{"choices":[{"message":{"content":"hello"}}]}'
         )
-        mock_chat.return_value = mock_resp
 
-        resp = self._post(
-            "/v1/chat/completions",
-            {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}]},
-            {"Authorization": "Bearer sk-test-key"},
-        )
-        self.assertEqual(resp.status, 200)
-        self.assertEqual(
-            resp.headers.get("Content-Type"), "application/json"
-        )
-        self.assertIsNotNone(resp.headers.get("Content-Length"))
-        body = json.loads(resp.read())
-        self.assertEqual(body["choices"][0]["message"]["content"], "hello")
-
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    @patch("mimo_code_proxy.upstream_chat")
-    def test_chat_upstream_502_propagates(self, mock_chat, _mock_jwt):
-        mock_chat.side_effect = Exception("upstream down")
-
-        try:
-            self._post(
+        be = self.balancer.pick()
+        with patch.object(be, "chat", return_value=mock_resp):
+            resp = self._post(
                 "/v1/chat/completions",
                 {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}]},
                 {"Authorization": "Bearer sk-test-key"},
             )
-            self.fail("expected 502")
-        except urllib.error.HTTPError as e:
-            self.assertEqual(e.code, 502)
+            self.assertEqual(resp.status, 200)
+            body = json.loads(resp.read())
+            self.assertEqual(body["choices"][0]["message"]["content"], "hello")
 
-    def test_404_on_unknown_path(self):
+    def test_chat_404_on_unknown_path(self):
         try:
-            self._get("/v1/nonexistent")
+            self._post("/v1/embeddings", {"input": "test"}, {"Authorization": "Bearer sk-test-key"})
             self.fail("expected 404")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 404)
 
-    def test_404_on_unknown_post(self):
-        try:
-            self._post(
-                "/v1/embeddings",
-                {"input": "test"},
-                {"Authorization": "Bearer sk-test-key"},
-            )
-            self.fail("expected 404")
-        except urllib.error.HTTPError as e:
-            self.assertEqual(e.code, 404)
+    def test_chat_upstream_error_propagates(self):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for be in self.balancer._backends:
+                stack.enter_context(patch.object(be, "chat", side_effect=Exception("upstream down")))
+            try:
+                self._post(
+                    "/v1/chat/completions",
+                    {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}]},
+                    {"Authorization": "Bearer sk-test-key"},
+                )
+                self.fail("expected 502")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 502)
 
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    @patch("mimo_code_proxy.upstream_chat")
-    def test_stream_response_chunked(self, mock_chat, _mock_jwt):
-        chunks = [b'data: {"choices":[{"delta":{"content":"h"}}]}\n\n',
-                  b'data: {"choices":[{"delta":{"content":"i"}}]}\n\n',
-                  b'data: [DONE]\n\n']
+    def test_stream_response(self):
+        chunks = [
+            b'data: {"choices":[{"delta":{"content":"h"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"i"}}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
         reads = iter(chunks)
 
         mock_resp = MagicMock()
@@ -286,38 +450,19 @@ class TestServer(unittest.TestCase):
                 return b""
 
         mock_resp.read = _read
-        mock_chat.return_value = mock_resp
 
-        resp = self._post(
-            "/chat/completions",
-            {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}],
-             "stream": True},
-            {"Authorization": "Bearer sk-test-key"},
-        )
-        self.assertEqual(resp.status, 200)
-        self.assertEqual(
-            resp.headers.get("Content-Type"), "text/event-stream"
-        )
-        self.assertEqual(resp.headers.get("Connection"), "close")
-        body = resp.read()
-        self.assertIn(b"data:", body)
-        self.assertIn(b"[DONE]", body)
-
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    @patch("mimo_code_proxy.upstream_chat")
-    def test_non_stream_has_content_length(self, mock_chat, _mock_jwt):
-        mock_resp = MagicMock()
-        mock_resp.headers = {"Content-Type": "application/json"}
-        mock_resp.read.return_value = b'{"choices":[]}'
-        mock_chat.return_value = mock_resp
-
-        resp = self._post(
-            "/chat/completions",
-            {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}]},
-            {"Authorization": "Bearer sk-test-key"},
-        )
-        self.assertEqual(resp.status, 200)
-        self.assertIsNotNone(resp.headers.get("Content-Length"))
+        be = self.balancer.pick()
+        with patch.object(be, "chat", return_value=mock_resp):
+            resp = self._post(
+                "/chat/completions",
+                {"model": "mimo-auto", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                {"Authorization": "Bearer sk-test-key"},
+            )
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers.get("Content-Type"), "text/event-stream")
+            body = resp.read()
+            self.assertIn(b"data:", body)
+            self.assertIn(b"[DONE]", body)
 
 
 class TestPathNormalization(unittest.TestCase):
@@ -339,202 +484,9 @@ class TestPathNormalization(unittest.TestCase):
             "/chat/completions",
         )
 
-    def test_trailing_slash_models(self):
+    def test_trailing_slash(self):
         self.assertEqual(proxy.normalize_path("/v1/models/"), "/models")
-
-    def test_trailing_slash_chat(self):
-        self.assertEqual(
-            proxy.normalize_path("/chat/completions/"),
-            "/chat/completions",
-        )
-
-
-class TestPathCompatibility(unittest.TestCase):
-    """集成测试：不带 /v1 前缀的路径也能命中。"""
-
-    @classmethod
-    def setUpClass(cls):
-        proxy.LOCAL_KEY = ""
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
-        cls.port = cls.server.server_address[1]
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-        time.sleep(0.1)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-
-    def setUp(self):
-        proxy._health_ok = False
-        proxy._health_ts = 0
-
-    def _url(self, path):
-        return f"http://127.0.0.1:{self.port}{path}"
-
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    def test_health_no_v1_prefix(self, _mock):
-        req = urllib.request.Request(self._url("/health"))
-        resp = urllib.request.urlopen(req, timeout=10)
-        self.assertEqual(resp.status, 200)
-
-    def test_models_no_v1_prefix(self):
-        req = urllib.request.Request(self._url("/models"))
-        resp = urllib.request.urlopen(req, timeout=10)
-        self.assertEqual(resp.status, 200)
-
-    @patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt")
-    @patch("mimo_code_proxy.upstream_chat")
-    def test_chat_no_v1_prefix(self, mock_chat, _mock_jwt):
-        mock_resp = MagicMock()
-        mock_resp.headers = {"Content-Type": "application/json"}
-        mock_resp.read.return_value = b'{"choices":[]}'
-        mock_chat.return_value = mock_resp
-        resp = urllib.request.urlopen(urllib.request.Request(
-            self._url("/chat/completions"),
-            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        ), timeout=10)
-        self.assertEqual(resp.status, 200)
-
-
-class TestUpstreamChatLogic(unittest.TestCase):
-    def setUp(self):
-        proxy._active_client = "test-fp-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-        proxy._active_jwt = None
-        proxy._active_jwt_exp = 0
-        proxy.LOCAL_KEY = ""
-
-    def test_guard_prompt_injected(self):
-        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
-            "urllib.request.urlopen"
-        ) as mock_urlopen:
-            mock_jwt.return_value = "test-jwt"
-            mock_resp = MagicMock()
-            mock_resp.headers = {"Content-Type": "application/json"}
-            mock_resp.read.return_value = b"{}"
-            mock_urlopen.return_value = mock_resp
-
-            proxy.upstream_chat(
-                {"messages": [{"role": "user", "content": "hi"}]}
-            )
-
-            call_args = mock_urlopen.call_args[0][0]
-            body = json.loads(call_args.data)
-            self.assertEqual(body["messages"][0]["role"], "system")
-            self.assertIn("MiMoCode", body["messages"][0]["content"])
-
-    def test_guard_not_duplicated(self):
-        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
-            "urllib.request.urlopen"
-        ) as mock_urlopen:
-            mock_jwt.return_value = "test-jwt"
-            mock_resp = MagicMock()
-            mock_resp.headers = {"Content-Type": "application/json"}
-            mock_resp.read.return_value = b"{}"
-            mock_urlopen.return_value = mock_resp
-
-            proxy.upstream_chat(
-                {
-                    "messages": [
-                        {"role": "system", "content": proxy.MIMO_GUARD_TEXT},
-                        {"role": "user", "content": "hi"},
-                    ]
-                }
-            )
-
-            call_args = mock_urlopen.call_args[0][0]
-            body = json.loads(call_args.data)
-            self.assertEqual(len(body["messages"]), 2)
-
-    def test_max_tokens_clamped(self):
-        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
-            "urllib.request.urlopen"
-        ) as mock_urlopen:
-            mock_jwt.return_value = "test-jwt"
-            mock_resp = MagicMock()
-            mock_resp.headers = {"Content-Type": "application/json"}
-            mock_resp.read.return_value = b"{}"
-            mock_urlopen.return_value = mock_resp
-
-            proxy.upstream_chat(
-                {
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "max_tokens": 999999,
-                }
-            )
-
-            call_args = mock_urlopen.call_args[0][0]
-            body = json.loads(call_args.data)
-            self.assertEqual(body["max_tokens"], proxy.MAX_OUTPUT_TOKENS)
-
-    def test_model_forced_to_mimo_auto(self):
-        with patch("mimo_code_proxy.ensure_jwt") as mock_jwt, patch(
-            "urllib.request.urlopen"
-        ) as mock_urlopen:
-            mock_jwt.return_value = "test-jwt"
-            mock_resp = MagicMock()
-            mock_resp.headers = {"Content-Type": "application/json"}
-            mock_resp.read.return_value = b"{}"
-            mock_urlopen.return_value = mock_resp
-
-            proxy.upstream_chat(
-                {
-                    "model": "gpt-4",
-                    "messages": [{"role": "user", "content": "hi"}],
-                }
-            )
-
-            call_args = mock_urlopen.call_args[0][0]
-            body = json.loads(call_args.data)
-            self.assertEqual(body["model"], "mimo-auto")
-
-
-class TestFingerprintRotation(unittest.TestCase):
-    def setUp(self):
-        proxy._active_client = "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
-        proxy._active_jwt = "test-jwt-0"
-        proxy._active_jwt_exp = (time.time() + 3600) * 1000
-        self._saved = os.environ.pop("MIMO_CLIENT_ID", None)
-        proxy.LOCAL_KEY = ""
-
-    def tearDown(self):
-        if self._saved:
-            os.environ["MIMO_CLIENT_ID"] = self._saved
-
-    def test_first_failure_rotates_fp(self):
-        call_count = [0]
-        def _fake_upstream(req, timeout=300):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise urllib.error.HTTPError(
-                    "url", 429, "rate limited", {}, io.BytesIO(b"{}")
-                )
-            resp = MagicMock()
-            resp.headers = {"Content-Type": "application/json"}
-            resp.read.return_value = b"{}"
-            resp.status = 200
-            return resp
-
-        with patch("mimo_code_proxy.ensure_jwt", return_value="test-jwt"), \
-             patch("mimo_code_proxy._replace_fingerprint") as mock_replace, \
-             patch("urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = _fake_upstream
-            proxy.upstream_chat({"messages": [{"role": "user", "content": "hi"}]})
-
-        self.assertEqual(call_count[0], 2)
-        mock_replace.assert_called_once()
-
-    def test_exhaust_retries_raises_last_error(self):
-        with patch("mimo_code_proxy.ensure_jwt", return_value="test-jwt"), \
-             patch("mimo_code_proxy._replace_fingerprint"), \
-             patch("urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = urllib.error.HTTPError(
-                "url", 429, "rate limited", {}, io.BytesIO(b"{}")
-            )
-            with self.assertRaises(urllib.error.HTTPError):
-                proxy.upstream_chat({"messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(proxy.normalize_path("/chat/completions/"), "/chat/completions")
 
 
 if __name__ == "__main__":

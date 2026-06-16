@@ -8,10 +8,9 @@ COPY mimo_code_proxy.py /app/mimo_code_proxy.py
 USER mimo
 WORKDIR /app
 
-ENV MIMO_HOST=0.0.0.0
-ENV MIMO_PORT=8788
-ENV MIMO_KEY=
-ENV MIMO_CLIENT_FILE=/data/mimo-client
+ENV MIMO_CONFIG=/app/mimo_config.json
+ENV MIMO_LOG_LEVEL=INFO
+ENV MIMO_FREE_BASE_URL=https://api.xiaomimimo.com
 
 EXPOSE 8788
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
