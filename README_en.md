@@ -1,6 +1,8 @@
 # mimo-code-proxy
 
-MiMo free channel → OpenAI-compatible API. Single public port, multiple proxy backends with round-robin load balancing. Each backend has its own fingerprint and JWT, fully isolated.
+Turn [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code)'s free `mimo-auto` API into OpenAI / Anthropic compatible endpoints. Single public port, multiple proxy backends with round-robin load balancing. Each backend has its own fingerprint and JWT, fully isolated.
+
+[中文文档](README.md)
 
 ## Why Multiple Backends?
 
@@ -21,6 +23,7 @@ Client ──→ :8788 ──┬─→ backend sg-01 (proxy: 7890, fp: sha256-1,
 - **Full isolation**: Each backend has its own fingerprint file and JWT
 - **Automatic fallback**: If one backend fails, the request tries the next until all are exhausted
 - **Self-healing JWTs**: Auto-refresh before expiry; force-refresh on 401/403
+- **429 auto-rotate**: Rotates fingerprint and re-bootstraps when rate limited
 
 ## Quick Start
 
@@ -32,11 +35,17 @@ cp mimo_config.example.json mimo_config.json
 # 2. Start with Docker
 docker compose up -d
 
-# 3. Test
+# 3. Test OpenAI format
 curl http://localhost:8788/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer sk-mimo-change-me' \
   -d '{"model":"mimo-auto","messages":[{"role":"user","content":"hello"}]}'
+
+# Test Anthropic format
+curl http://localhost:8788/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'x-api-key: sk-mimo-change-me' \
+  -d '{"model":"mimo-auto","max_tokens":200,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ## Configuration
@@ -88,8 +97,16 @@ Requirements: Python 3.10+, stdlib only.
 | Path | Method | Description |
 |------|--------|-------------|
 | `/v1/models` | GET | Model list (always returns `mimo-auto`) |
-| `/v1/chat/completions` | POST | Chat completions (OpenAI-compatible) |
+| `/v1/chat/completions` | POST | Chat completions (**OpenAI-compatible**) |
+| `/v1/messages` | POST | Chat completions (**Anthropic Messages API-compatible**) |
 | `/v1/health` | GET | Health check. Returns backend count |
+
+### Anthropic Format Notes
+
+- Auth: `x-api-key` header (compatible with Claude SDK)
+- `system` field auto-converted to OpenAI `system` role
+- Streaming: OpenAI SSE chunks → Anthropic event stream (`message_start` → `content_block_delta` → `message_stop`)
+- Non-streaming: Returns standard Anthropic message response structure
 
 ## Where Do Proxy Addresses Come From?
 
@@ -106,7 +123,7 @@ Just put their local listening addresses into `backends[].proxy`.
 python3 -m unittest test_mimo_code_proxy -v
 ```
 
-35 tests covering config loading, fingerprint generation, JWT refresh, round-robin distribution, error fallback, and end-to-end HTTP.
+47 tests covering config loading, fingerprint generation, JWT refresh, round-robin distribution, error fallback, 429 fingerprint rotation, Anthropic format conversion, and end-to-end HTTP.
 
 ## Technical Constraints
 
