@@ -55,6 +55,10 @@ python3 -m unittest test_mimo_code_proxy -v
 | MIMO_KEY | (空) | API 密钥，空则无鉴权 |
 | MIMO_UPSTREAM | https://api.xiaomimimo.com | 上游地址 |
 | MIMO_CLIENT_FILE | /data/mimo-client | 指纹持久化路径 |
+| MIMO_MAX_RETRY | 3 | 单请求最多换几个指纹 |
+| MIMO_LOG_LEVEL | INFO | 日志级别 DEBUG/INFO/WARN/ERROR |
+
+⚠️ DEBUG 级别会把用户对话正文写入 stderr 日志，生产环境应调回 INFO 避免隐私泄露。
 
 ## Docker
 
