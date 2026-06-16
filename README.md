@@ -131,6 +131,10 @@ python3 -m unittest test_mimo_code_proxy -v
 - 仅支持 HTTP/HTTPS 代理（SOCKS5 需要外部依赖）
 - `mimo-auto` 是 reasoning 模型，建议 `max_tokens` ≥ 200
 
+## 致谢
+
+感谢 [Linux DO](https://linux.do/) 社区对开源项目的推广与支持。
+
 ## License
 
 MIT

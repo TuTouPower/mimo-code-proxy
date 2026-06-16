@@ -131,6 +131,10 @@ python3 -m unittest test_mimo_code_proxy -v
 - Only HTTP/HTTPS proxies (SOCKS5 requires external deps)
 - `mimo-auto` is a reasoning model. Suggest `max_tokens` ≥ 200
 
+## Acknowledgements
+
+Thanks to the [Linux DO](https://linux.do/) community for promoting open-source projects.
+
 ## License
 
 MIT
