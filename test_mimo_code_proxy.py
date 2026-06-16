@@ -255,6 +255,30 @@ class TestMimoBackendChat(unittest.TestCase):
 
         self.assertEqual(captured["body"]["max_tokens"], proxy.MAX_OUTPUT_TOKENS)
 
+    def test_chat_429_rotates_fingerprint(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.fingerprint = "old-fp"
+        be.jwt = "old-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        call_count = [0]
+        def _fake_open(req, timeout=300):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise urllib.error.HTTPError("url", 429, "rate limited", {}, io.BytesIO(b"{}"))
+            mock_resp = MagicMock()
+            mock_resp.headers = {"Content-Type": "application/json"}
+            mock_resp.read.return_value = b'{"choices":[{"message":{"content":"ok"}}]}'
+            mock_resp.status = 200
+            return mock_resp
+
+        with patch("urllib.request.OpenerDirector.open", side_effect=_fake_open), \
+             patch.object(be, "_bootstrap") as mock_bootstrap:
+            mock_bootstrap.return_value = ("new-jwt", (time.time() + 3600) * 1000)
+            resp = be.chat({"messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(mock_bootstrap.call_count, 1)  # _rotate_fingerprint calls _bootstrap
+            self.assertNotEqual(be.fingerprint, "old-fp")
+
 
 class TestRoundRobin(unittest.TestCase):
     def test_picks_in_order(self):
@@ -318,6 +342,16 @@ class TestHandlerAuth(unittest.TestCase):
     def test_auth_fail_missing_header(self):
         h = self._make_handler("sk-test-123")
         h.headers = {}
+        self.assertFalse(h._auth_ok())
+
+    def test_auth_ok_x_api_key(self):
+        h = self._make_handler("sk-test-123")
+        h.headers = {"x-api-key": "sk-test-123"}
+        self.assertTrue(h._auth_ok())
+
+    def test_auth_fail_wrong_x_api_key(self):
+        h = self._make_handler("sk-test-123")
+        h.headers = {"x-api-key": "wrong-key"}
         self.assertFalse(h._auth_ok())
 
 

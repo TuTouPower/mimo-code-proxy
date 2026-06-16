@@ -160,6 +160,16 @@ class MimoBackend:
             )
             return self.jwt
 
+    def _rotate_fingerprint(self, req_id=None):
+        """生成新指纹，重新 bootstrap JWT。"""
+        old_fp = self.fingerprint[:8] + "..." if self.fingerprint else "none"
+        self.fingerprint = self._create_fp()
+        self.jwt = None
+        self.jwt_exp = 0
+        log("INFO", f"fingerprint rotated {old_fp} -> {self.fingerprint[:8]}...", req_id=req_id, backend=self.name)
+        self.jwt, self.jwt_exp = self._bootstrap()
+        return self.jwt
+
     def chat(self, payload, req_id=None):
         payload = dict(payload)
         payload["model"] = UPSTREAM_MODEL
@@ -213,6 +223,16 @@ class MimoBackend:
                     backend=self.name,
                 )
                 return _do(self.get_jwt(force=True))
+            if e.code == 429:
+                log(
+                    "WARN",
+                    f"rate limited -> rotate fingerprint",
+                    req_id=req_id,
+                    backend=self.name,
+                )
+                with self._lock:
+                    self._rotate_fingerprint(req_id=req_id)
+                return _do(self.get_jwt())
             raise
 
 
@@ -261,7 +281,11 @@ def make_handler(balancer, api_key):
         def _auth_ok(self):
             if not api_key:
                 return True
-            return self.headers.get("Authorization") == f"Bearer {api_key}"
+            if self.headers.get("Authorization") == f"Bearer {api_key}":
+                return True
+            if self.headers.get("x-api-key") == api_key:
+                return True
+            return False
 
         def _respond(self, code, body_bytes, content_type="application/json"):
             self.send_response(code)
