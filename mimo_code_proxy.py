@@ -9,9 +9,6 @@ import uuid
 import threading
 import urllib.request
 import urllib.error
-# auto-proxy: read http_proxy/https_proxy/all_proxy from env
-_proxy_handler = urllib.request.ProxyHandler(urllib.request.getproxies())
-urllib.request.install_opener(urllib.request.build_opener(_proxy_handler))
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = os.environ.get("MIMO_UPSTREAM", "https://api.xiaomimimo.com").rstrip("/")
