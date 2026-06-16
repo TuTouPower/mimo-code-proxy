@@ -65,16 +65,16 @@ def new_req_id():
     return uuid.uuid4().hex[:8]
 
 
-def _load_or_create_fp():
+def _load_or_create_fp(req_id=None):
     """从 CLIENT_FILE 或 MIMO_CLIENT_ID 读取，否则生成新 UUID 并持久化。"""
     fp = os.environ.get("MIMO_CLIENT_ID", "").strip()
     if fp:
-        log("DEBUG", "using MIMO_CLIENT_ID")
+        log("DEBUG", "using MIMO_CLIENT_ID", req_id=req_id)
         return fp
     try:
         fp = open(CLIENT_FILE).read().strip()
         if fp:
-            log("DEBUG", "loaded fp from file")
+            log("DEBUG", "loaded fp from file", req_id=req_id)
             return fp
     except Exception:
         pass
@@ -85,19 +85,19 @@ def _load_or_create_fp():
             f.write(fp)
         os.chmod(CLIENT_FILE, 0o600)
     except Exception as e:
-        log("WARN", "cannot persist fingerprint", e)
-    log("INFO", "generated new fp:", fp[:8] + "...")
+        log("WARN", "cannot persist fingerprint", e, req_id=req_id)
+    log("INFO", "generated new fp:", fp[:8] + "...", req_id=req_id)
     return fp
 
 
-def _persist_fp(fp):
+def _persist_fp(fp, req_id=None):
     try:
         os.makedirs(os.path.dirname(CLIENT_FILE), exist_ok=True)
         with open(CLIENT_FILE, "w") as f:
             f.write(fp)
         os.chmod(CLIENT_FILE, 0o600)
     except Exception as e:
-        log("WARN", "cannot persist fingerprint", e)
+        log("WARN", "cannot persist fingerprint", e, req_id=req_id)
 
 
 def _replace_fingerprint(req_id=None):
@@ -107,7 +107,7 @@ def _replace_fingerprint(req_id=None):
     _active_client = str(uuid.uuid4())
     _active_jwt = None
     _active_jwt_exp = 0
-    _persist_fp(_active_client)
+    _persist_fp(_active_client, req_id=req_id)
     log("INFO", "fingerprint rotated", old, "->", _active_client[:8] + "...", req_id=req_id)
     _active_jwt, _active_jwt_exp = _bootstrap_with(_active_client, req_id=req_id)
 
@@ -248,19 +248,22 @@ MODELS_RESP = {
 }
 
 
-def check_health():
+def check_health(req_id=None):
     global _health_ok, _health_ts
     now = time.time()
     if _health_ok and (now - _health_ts) < _HEALTH_CACHE_S:
+        log("DEBUG", "health cache hit", req_id=req_id)
         return True, None
     try:
-        ensure_jwt()
+        ensure_jwt(req_id=req_id)
         _health_ok = True
         _health_ts = now
+        log("DEBUG", "health upstream ok", req_id=req_id)
         return True, None
     except Exception as e:
         _health_ok = False
         _health_ts = now
+        log("WARN", "health upstream degraded", repr(e), req_id=req_id)
         return False, str(e)
 
 
@@ -290,7 +293,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(401, {"error": {"message": "invalid key"}})
             return self._json(200, MODELS_RESP)
         if np == "/health":
-            ok, err = check_health()
+            req_id = new_req_id()
+            log("DEBUG", "GET health", req_id=req_id)
+            ok, err = check_health(req_id=req_id)
             if ok:
                 return self._json(200, {"status": "ok", "upstream": "ok"})
             return self._json(

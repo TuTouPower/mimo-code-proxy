@@ -29,24 +29,24 @@ class TestFingerprint(unittest.TestCase):
             os.environ["MIMO_CLIENT_ID"] = self._saved_client_id
 
     def test_load_or_create_fp_returns_uuid_format(self):
-        fp = proxy._load_or_create_fp()
+        fp = proxy._load_or_create_fp(req_id="test")
         parts = fp.split("-")
         self.assertEqual(len(parts), 5)
         self.assertEqual(len(fp), 36)
 
     def test_load_or_create_fp_from_env(self):
         os.environ["MIMO_CLIENT_ID"] = "my-custom-fp"
-        self.assertEqual(proxy._load_or_create_fp(), "my-custom-fp")
+        self.assertEqual(proxy._load_or_create_fp(req_id="test"), "my-custom-fp")
 
     def test_load_or_create_fp_cached_from_file(self):
         with patch.object(proxy, "open", unittest.mock.mock_open(read_data="cached-fp")):
-            fp = proxy._load_or_create_fp()
+            fp = proxy._load_or_create_fp(req_id="test")
             self.assertEqual(fp, "cached-fp")
 
     def test_load_or_create_fp_deterministic_with_env(self):
         os.environ["MIMO_CLIENT_ID"] = "fixed-fp"
-        self.assertEqual(proxy._load_or_create_fp(), "fixed-fp")
-        self.assertEqual(proxy._load_or_create_fp(), "fixed-fp")
+        self.assertEqual(proxy._load_or_create_fp(req_id="test"), "fixed-fp")
+        self.assertEqual(proxy._load_or_create_fp(req_id="test"), "fixed-fp")
 
 
 class TestJwtDecode(unittest.TestCase):
@@ -78,20 +78,20 @@ class TestHealthCheck(unittest.TestCase):
 
     def test_check_health_ok(self):
         with patch("mimo_code_proxy.ensure_jwt", return_value="mock-jwt"):
-            ok, err = proxy.check_health()
+            ok, err = proxy.check_health(req_id="test")
             self.assertTrue(ok)
             self.assertIsNone(err)
 
     def test_check_health_degraded(self):
         with patch("mimo_code_proxy.ensure_jwt", side_effect=Exception("boom")):
-            ok, err = proxy.check_health()
+            ok, err = proxy.check_health(req_id="test")
             self.assertFalse(ok)
             self.assertIn("boom", err)
 
     def test_health_cache_returns_cached(self):
         proxy._health_ok = True
         proxy._health_ts = time.time()
-        ok, err = proxy.check_health()
+        ok, err = proxy.check_health(req_id="test")
         self.assertTrue(ok)
         self.assertIsNone(err)
 
