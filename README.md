@@ -115,7 +115,27 @@ python3 mimo_code_proxy.py -c mimo_config.json
 - 各 VPS 上的 tinyproxy、squid
 - 云服务商的转发代理
 
-把它们的本地监听地址填到 `backends[].proxy` 即可。
+### 推荐：mihomo 多端口配置
+
+推荐使用 [mihomo (Meta)](https://github.com/MetaCubeX/mihomo/tree/Meta) 作为代理前端。通过 `listeners` 配置多个 HTTP 端口，每个端口绑定不同的出口节点：
+
+```yaml
+listeners:
+  - name: sg-out
+    type: http
+    port: 7890
+    proxy: sg-node
+  - name: jp-out
+    type: http
+    port: 7891
+    proxy: jp-node
+  - name: us-out
+    type: http
+    port: 7892
+    proxy: us-node
+```
+
+这样单个 mihomo 实例即可提供多个独立出口，填入 `backends[].proxy` 即可。
 
 ## 测试
 

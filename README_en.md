@@ -115,7 +115,27 @@ You need **egress proxies** (not inbound proxies). Common sources:
 - Tinyproxy, squid running on various VPS
 - Cloud provider forwarding proxies
 
-Just put their local listening addresses into `backends[].proxy`.
+### Recommended: mihomo Multi-Port Setup
+
+We recommend [mihomo (Meta)](https://github.com/MetaCubeX/mihomo/tree/Meta) as the proxy frontend. Configure multiple HTTP ports via `listeners`, each bound to a different egress node:
+
+```yaml
+listeners:
+  - name: sg-out
+    type: http
+    port: 7890
+    proxy: sg-node
+  - name: jp-out
+    type: http
+    port: 7891
+    proxy: jp-node
+  - name: us-out
+    type: http
+    port: 7892
+    proxy: us-node
+```
+
+A single mihomo instance can provide multiple independent egress points. Just put the local addresses into `backends[].proxy`.
 
 ## Testing
 
