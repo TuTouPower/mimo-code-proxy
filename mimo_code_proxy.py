@@ -233,6 +233,13 @@ class MimoBackend:
                 with self._lock:
                     self._rotate_fingerprint(req_id=req_id)
                 return _do(self.get_jwt())
+            if e.code == 441:
+                log(
+                    "WARN",
+                    "upstream 441 risk control blocked",
+                    req_id=req_id,
+                    backend=self.name,
+                )
             raise
 
 
@@ -274,6 +281,7 @@ def make_handler(balancer, api_key):
     ).encode()
 
     ANTHROPIC_MSG_RESP_ID = "msg_" + uuid.uuid4().hex[:24]
+    _req_count = {}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -297,6 +305,11 @@ def make_handler(balancer, api_key):
         def log_message(self, *a):
             pass
 
+        def _log_req(self, req_id, backend, status, t_start):
+            elapsed = int((time.time() - t_start) * 1000)
+            log("INFO", f"status={status} elapsed={elapsed}ms",
+                req_id=req_id, backend=backend)
+
         def do_GET(self):
             np = normalize_path(self.path)
             if np == "/models":
@@ -308,12 +321,13 @@ def make_handler(balancer, api_key):
                 log("DEBUG", "GET health", req_id=req_id)
                 return self._respond(
                     200,
-                    json.dumps({"status": "ok", "backends": len(balancer)}).encode(),
+                    json.dumps({"status": "ok", "backends": len(balancer), "requests": _req_count}).encode(),
                 )
             self._respond(404, b'{"error":{"message":"not found"}}')
 
         def do_POST(self):
             req_id = new_req_id()
+            t_start = time.time()
             log("DEBUG", "POST", self.path, req_id=req_id)
 
             np = normalize_path(self.path)
@@ -321,13 +335,16 @@ def make_handler(balancer, api_key):
             is_openai = np == "/chat/completions"
 
             if not is_openai and not is_anthropic:
+                self._log_req(req_id, "-", 404, t_start)
                 return self._respond(404, b'{"error":{"message":"not found"}}')
             if not self._auth_ok():
+                self._log_req(req_id, "-", 401, t_start)
                 return self._respond(401, b'{"error":{"message":"invalid key"}}')
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 payload = json.loads(self.rfile.read(n).decode())
             except Exception as e:
+                self._log_req(req_id, "-", 400, t_start)
                 return self._respond(
                     400,
                     json.dumps({"error": {"message": f"bad request: {e}"}}).encode(),
@@ -337,6 +354,7 @@ def make_handler(balancer, api_key):
             tried = set()
             while len(tried) < len(balancer):
                 be = balancer.pick()
+                _req_count[be.name] = _req_count.get(be.name, 0) + 1
                 if be.name in tried:
                     break
                 tried.add(be.name)
@@ -459,6 +477,7 @@ def make_handler(balancer, api_key):
                             log("DEBUG", "stream done", total, "bytes", elapsed, "ms", f"DONE={done_seen}", req_id=req_id, backend=tag)
                 finally:
                     resp.close()
+                self._log_req(req_id, tag, 200, t_start)
                 return
 
             # All backends failed
@@ -467,6 +486,7 @@ def make_handler(balancer, api_key):
                     "type": "error",
                     "error": {"type": "api_error", "message": f"all backends failed: {last_error}"},
                 }).encode())
+                self._log_req(req_id, tag, 502, t_start)
             else:
                 if isinstance(last_error, urllib.error.HTTPError):
                     body = last_error.read().decode(errors="replace")
@@ -475,8 +495,10 @@ def make_handler(balancer, api_key):
                     except Exception:
                         obj = {"error": {"message": body[:500], "code": last_error.code}}
                     log("DEBUG", "upstream HTTPError", last_error.code, req_id=req_id)
+                    self._log_req(req_id, tag, last_error.code, t_start)
                     return self._respond(last_error.code, json.dumps(obj).encode())
                 log("ERROR", "upstream fatal", repr(last_error), req_id=req_id)
+                self._log_req(req_id, tag, 502, t_start)
                 return self._respond(
                     502, json.dumps({"error": {"message": str(last_error)}}).encode(),
                 )
