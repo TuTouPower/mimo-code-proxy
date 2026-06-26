@@ -86,17 +86,18 @@ class TestMimoBackendFingerprint(unittest.TestCase):
         be2.ensure_fp()
         self.assertEqual(be2.fingerprint, fp1)
 
-    def test_fp_different_names(self):
+    def test_fp_shared_across_backends(self):
+        # 全局单指纹: 不同 name 的 backend 共享同一指纹
         be1 = proxy.MimoBackend("be-1", None, self.fp_dir)
         be2 = proxy.MimoBackend("be-2", None, self.fp_dir)
         be1.ensure_fp()
         be2.ensure_fp()
-        self.assertNotEqual(be1.fingerprint, be2.fingerprint)
+        self.assertEqual(be1.fingerprint, be2.fingerprint)
 
     def test_fp_file_created(self):
         be = proxy.MimoBackend("test-be", None, self.fp_dir)
         be.ensure_fp()
-        fp_path = os.path.join(self.fp_dir, "fp_test-be")
+        fp_path = os.path.join(self.fp_dir, "fp_global")
         self.assertTrue(os.path.exists(fp_path))
         with open(fp_path) as f:
             self.assertEqual(f.read().strip(), be.fingerprint)

@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import platform
-import random
+import secrets
 import sys
 import threading
 import time
@@ -23,6 +23,16 @@ CHAT_URL = f"{UPSTREAM_BASE}/api/free-ai/openai/chat"
 UPSTREAM_MODEL = "mimo-auto"
 MAX_OUTPUT_TOKENS = 131072
 REFRESH_MARGIN = 300
+JWT_REFRESH_INTERVAL = 30
+
+USER_AGENT = "mimocode/1.0.0"
+
+_global_fp = None
+_global_fp_lock = threading.Lock()
+
+
+def _random_hex(n):
+    return secrets.token_hex(n)
 
 MIMO_GUARD_TEXT = (
     "You are MiMoCode, an interactive CLI tool that helps users with "
@@ -72,7 +82,7 @@ class MimoBackend:
         self._lock = threading.Lock()
 
     def _fp_path(self):
-        return os.path.join(self._fingerprint_dir, f"fp_{self.name}")
+        return os.path.join(self._fingerprint_dir, "fp_global")
 
     def _load_fp(self):
         try:
@@ -87,25 +97,31 @@ class MimoBackend:
             f.write(fp)
         os.chmod(self._fp_path(), 0o600)
 
-    def _create_fp(self):
-        raw = "|".join(
-            [
-                self.name,
-                platform.node(),
-                "linux",
-                "x64",
-                platform.processor() or "x86_64",
-                str(random.random()),
-            ]
-        )
-        fp = hashlib.sha256(raw.encode()).hexdigest()
-        self._save_fp(fp)
-        return fp
+    @staticmethod
+    def _create_fp():
+        hostname = platform.node()
+        os_name = platform.system()
+        arch = platform.machine()
+        username = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+        uid = str(uuid.uuid4())
+        raw = f"{hostname}|{os_name}|{arch}|{username}|{uid}"
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def ensure_fp(self):
-        if self.fingerprint:
+        global _global_fp
+        if _global_fp:
+            self.fingerprint = _global_fp
             return
-        self.fingerprint = self._load_fp() or self._create_fp()
+        with _global_fp_lock:
+            if _global_fp:
+                self.fingerprint = _global_fp
+                return
+            fp = self._load_fp()
+            if not fp:
+                fp = self._create_fp()
+                self._save_fp(fp)
+            _global_fp = fp
+            self.fingerprint = fp
 
     def _make_opener(self):
         if not self.proxy_url:
@@ -134,7 +150,10 @@ class MimoBackend:
             BOOTSTRAP_URL,
             data=body,
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
         )
         with self._make_opener().open(req, timeout=30) as r:
             data = json.loads(r.read().decode())
@@ -159,6 +178,17 @@ class MimoBackend:
                 backend=self.name,
             )
             return self.jwt
+
+    def start_jwt_refresher(self):
+        def _run():
+            while True:
+                time.sleep(JWT_REFRESH_INTERVAL)
+                try:
+                    self.get_jwt()
+                except Exception:
+                    pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
 
     def _rotate_fingerprint(self, req_id=None):
         """生成新指纹，重新 bootstrap JWT。"""
@@ -207,6 +237,8 @@ class MimoBackend:
                 headers={
                     "Authorization": f"Bearer {jwt}",
                     "X-Mimo-Source": "mimocode-cli-free",
+                    "x-session-affinity": "ses_" + _random_hex(12),
+                    "User-Agent": USER_AGENT,
                     "Content-Type": "application/json",
                 },
             )
@@ -298,6 +330,9 @@ def make_handler(balancer, api_key):
         def _respond(self, code, body_bytes, content_type="application/json"):
             self.send_response(code)
             self.send_header("Content-Type", content_type)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Content-Length", str(len(body_bytes)))
             self.end_headers()
             self.wfile.write(body_bytes)
@@ -671,6 +706,7 @@ def main():
                 f"bootstrap 失败 (请求时重试): {e}",
                 backend=be.name,
             )
+        be.start_jwt_refresher()
         backends.append(be)
 
     balancer = RoundRobin(backends)
