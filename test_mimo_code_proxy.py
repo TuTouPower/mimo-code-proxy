@@ -65,6 +65,7 @@ class TestMimoBackendFingerprint(unittest.TestCase):
         for f in os.listdir(self.fp_dir):
             if f.startswith("fp_"):
                 os.remove(os.path.join(self.fp_dir, f))
+        proxy._global_fp = None
 
     def tearDown(self):
         import shutil
@@ -279,6 +280,9 @@ class TestMimoBackendChat(unittest.TestCase):
             resp = be.chat({"messages": [{"role": "user", "content": "hi"}]})
             self.assertEqual(mock_bootstrap.call_count, 1)  # _rotate_fingerprint calls _bootstrap
             self.assertNotEqual(be.fingerprint, "old-fp")
+            self.assertEqual(len(be.fingerprint), 64)
+            # Verify _global_fp was synced to new fingerprint
+            self.assertEqual(proxy._global_fp, be.fingerprint)
 
 
 class TestRoundRobin(unittest.TestCase):

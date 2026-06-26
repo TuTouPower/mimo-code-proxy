@@ -185,18 +185,23 @@ class MimoBackend:
                 time.sleep(JWT_REFRESH_INTERVAL)
                 try:
                     self.get_jwt()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log("DEBUG", f"JWT refresher: {e}", backend=self.name)
         t = threading.Thread(target=_run, daemon=True)
         t.start()
 
     def _rotate_fingerprint(self, req_id=None):
         """生成新指纹，重新 bootstrap JWT。"""
+        global _global_fp
         old_fp = self.fingerprint[:8] + "..." if self.fingerprint else "none"
-        self.fingerprint = self._create_fp()
+        fp = self._create_fp()
+        with _global_fp_lock:
+            _global_fp = fp
+            self.fingerprint = fp
+        self._save_fp(fp)
         self.jwt = None
         self.jwt_exp = 0
-        log("INFO", f"fingerprint rotated {old_fp} -> {self.fingerprint[:8]}...", req_id=req_id, backend=self.name)
+        log("INFO", f"fingerprint rotated {old_fp} -> {fp[:8]}...", req_id=req_id, backend=self.name)
         self.jwt, self.jwt_exp = self._bootstrap()
         return self.jwt
 
