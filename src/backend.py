@@ -9,7 +9,7 @@ import urllib.request
 from . import constants
 from . import fingerprint
 
-_CHAT_WHITELIST = {"model", "messages", "temperature", "max_tokens", "stream", "tools", "tool_choice"}
+_CHAT_WHITELIST = {"model", "messages", "temperature", "max_tokens", "stream", "stream_options", "tools", "tool_choice"}
 
 
 class MimoBackend:
@@ -82,6 +82,7 @@ class MimoBackend:
         filtered["temperature"] = 1.0
         filtered["max_tokens"] = constants.MAX_OUTPUT_TOKENS
         filtered["stream"] = True
+        filtered["stream_options"] = {"include_usage": True}
 
         msgs = constants._MIMO_PREFIX_MESSAGES + list(filtered.get("messages") or [])
         filtered["messages"] = msgs

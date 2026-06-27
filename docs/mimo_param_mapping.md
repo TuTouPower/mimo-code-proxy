@@ -10,6 +10,7 @@
 | `temperature` | **强制覆盖** | `1.0` | — |
 | `max_tokens` | **强制覆盖** | `128000` | — |
 | `stream` | **强制覆盖** | `true` | 正版 CLI 始终发 `stream: true` |
+| `stream_options` | **强制覆盖** | `{"include_usage": true}` | `provider.ts:1441-1443` 固定值 |
 | `top_p` | **删除** | — | 正版不发送此参数 |
 | `top_k` | **删除** | — | 正版不发送此参数 |
 | `messages` | **前面插入** 2 条 system msg | 见下方 | — |

@@ -153,7 +153,9 @@ class TestMimoBackend(unittest.TestCase):
         mock_resp.read.return_value = b'{}'
         with patch("urllib.request.OpenerDirector.open", return_value=mock_resp) as m:
             be.chat({"messages": [{"role": "user", "content": "hi"}], "stream": False})
-            self.assertTrue(json.loads(m.call_args[0][0].data)["stream"])
+            body = json.loads(m.call_args[0][0].data)
+        self.assertTrue(body["stream"])
+        self.assertEqual(body["stream_options"], {"include_usage": True})
 
     def test_chat_extra_fields_stripped(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
@@ -171,6 +173,7 @@ class TestMimoBackend(unittest.TestCase):
         self.assertNotIn("presence_penalty", body)
         self.assertNotIn("top_k", body)
         self.assertNotIn("provider_options", body)
+        self.assertIn("stream_options", body)
 
     def test_chat_401_retries(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
