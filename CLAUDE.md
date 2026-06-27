@@ -36,15 +36,16 @@ python3 -m unittest discover -s tests -v
 
 测试覆盖：
 - 配置文件加载与验证
-- 指纹生成与持久化（SHA256，格式对齐 MiMo Code CLI）
-- JWT 解码、过期刷新、401/403 强制刷新
+- 指纹生成与持久化（SHA256，per-backend 独立，格式对齐 MiMo Code CLI）
+- JWT 解码、过期刷新、401/403 强制刷新（仅 chat 时懒加载，无后台线程）
 - RoundRobin 轮询（含并发线程安全）
 - 鉴权（无 KEY / 正确 KEY / 错误 KEY / 缺少 header）
 - HTTP 端点：health、models、chat completions
 - 多 backend 错误回退
 - 上游错误传播、404
-- model/temperature/max_tokens/top_p/top_k 参数覆盖
-- system 消息品牌标识注入
+- model/temperature/max_tokens/stream 强制覆盖 + top_p/top_k 删除
+- 请求体白名单过滤（非白名单字段丢弃）
+- system 消息品牌标识前置插入（2 条）
 - 流式 / 非流式响应转发
 - Anthropic Messages API 格式转换
 

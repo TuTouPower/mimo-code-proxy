@@ -16,7 +16,6 @@ CHAT_URL = f"{UPSTREAM_BASE}/api/free-ai/openai/chat"
 UPSTREAM_MODEL = "mimo-auto"
 MAX_OUTPUT_TOKENS = 128000
 REFRESH_MARGIN = 300
-JWT_REFRESH_INTERVAL = 30
 USER_AGENT = "mimocode/prod/0.1.3/cli"
 
 LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}

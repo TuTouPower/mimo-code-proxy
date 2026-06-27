@@ -1,7 +1,6 @@
 from src.constants import (
     BOOTSTRAP_URL,
     CHAT_URL,
-    JWT_REFRESH_INTERVAL,
     LOG_LEVELS,
     LOG_THRESHOLD,
     MAX_OUTPUT_TOKENS,
@@ -15,12 +14,9 @@ from src.constants import (
     new_req_id,
 )
 from src.fingerprint import (
-    _create_fp,
-    _ensure_fp,
-    _get_cpu_model,
-    _normalize_arch,
+    create_fingerprint,
+    load_or_create_fingerprint,
 )
-from src import fingerprint
 from src.backend import MimoBackend, RoundRobin
 from src.config import load_config
 from src.handler import make_handler, normalize_path

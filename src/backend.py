@@ -9,6 +9,8 @@ import urllib.request
 from . import constants
 from . import fingerprint
 
+_CHAT_WHITELIST = {"model", "messages", "temperature", "max_tokens", "stream", "tools", "tool_choice"}
+
 
 class MimoBackend:
     def __init__(self, name, proxy_url, fingerprint_dir):
@@ -42,7 +44,7 @@ class MimoBackend:
         return time.time() * 1000 + 3600 * 1000
 
     def _bootstrap(self):
-        fp = fingerprint._ensure_fp(self._fingerprint_dir)
+        fp = fingerprint.load_or_create_fingerprint(self._fingerprint_dir, self.name)
         body = json.dumps({"client": fp}).encode()
         req = urllib.request.Request(
             constants.BOOTSTRAP_URL,
@@ -74,33 +76,20 @@ class MimoBackend:
             )
             return self.jwt
 
-    def start_jwt_refresher(self):
-        def _run():
-            while True:
-                time.sleep(constants.JWT_REFRESH_INTERVAL)
-                try:
-                    self.get_jwt()
-                except Exception as e:
-                    constants.log("DEBUG", f"JWT refresher: {e}", backend=self.name)
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-
     def chat(self, payload, req_id=None):
-        payload = dict(payload)
-        payload["model"] = constants.UPSTREAM_MODEL
-        payload["temperature"] = 1.0
-        payload["max_tokens"] = constants.MAX_OUTPUT_TOKENS
-        payload.pop("top_p", None)
-        payload.pop("top_k", None)
+        filtered = {k: v for k, v in payload.items() if k in _CHAT_WHITELIST}
+        filtered["model"] = constants.UPSTREAM_MODEL
+        filtered["temperature"] = 1.0
+        filtered["max_tokens"] = constants.MAX_OUTPUT_TOKENS
+        filtered["stream"] = True
 
-        msgs = constants._MIMO_PREFIX_MESSAGES + list(payload.get("messages") or [])
-        payload["messages"] = msgs
+        msgs = constants._MIMO_PREFIX_MESSAGES + list(filtered.get("messages") or [])
+        filtered["messages"] = msgs
 
         opener = self._make_opener()
 
         def _do(jwt):
-            body = json.dumps(payload).encode()
+            body = json.dumps(filtered).encode()
             req = urllib.request.Request(
                 constants.CHAT_URL,
                 data=body,

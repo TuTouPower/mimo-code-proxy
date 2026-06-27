@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
+"""per-backend 设备指纹：SHA256(hostname|os|arch|cpu|username)，与 mimo-free 扩展一致"""
 import hashlib
 import os
 import platform
-import threading
-
-_global_fp = None
-_global_fp_lock = threading.Lock()
-_GLOBAL_FP_FILE = "fp_global"
 
 
 def _get_cpu_model():
@@ -29,7 +25,7 @@ def _normalize_arch(machine: str) -> str:
     return m
 
 
-def _create_fp():
+def create_fingerprint():
     hostname = platform.node()
     os_name = platform.system().lower()
     arch = _normalize_arch(platform.machine())
@@ -39,21 +35,15 @@ def _create_fp():
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _ensure_fp(fp_dir):
-    global _global_fp
-    if _global_fp:
-        return _global_fp
-    with _global_fp_lock:
-        if _global_fp:
-            return _global_fp
-        fp_path = os.path.join(fp_dir, _GLOBAL_FP_FILE)
-        try:
-            with open(fp_path) as f:
-                _global_fp = f.read().strip()
-        except Exception:
-            _global_fp = _create_fp()
-            os.makedirs(fp_dir, exist_ok=True)
-            with open(fp_path, "w") as f:
-                f.write(_global_fp)
-            os.chmod(fp_path, 0o600)
-    return _global_fp
+def load_or_create_fingerprint(fp_dir, name):
+    os.makedirs(fp_dir, exist_ok=True)
+    fp_path = os.path.join(fp_dir, f"fp_{name}")
+    try:
+        with open(fp_path) as f:
+            return f.read().strip()
+    except Exception:
+        fp = create_fingerprint()
+        with open(fp_path, "w") as f:
+            f.write(fp)
+        os.chmod(fp_path, 0o600)
+        return fp

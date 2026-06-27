@@ -47,18 +47,25 @@ class TestLoadConfig(unittest.TestCase):
 
 
 class TestFingerprint(unittest.TestCase):
-    def setUp(self):
-        proxy.fingerprint._global_fp = None
-
-    def test_create_fp_format(self):
-        fp = proxy._create_fp()
+    def test_create_fingerprint_format(self):
+        fp = proxy.create_fingerprint()
         self.assertEqual(len(fp), 64)
         self.assertIsInstance(fp, str)
 
-    def test_global_singleton(self):
-        proxy.fingerprint._global_fp = "test-fp-1234"
-        result = proxy._ensure_fp("/tmp/test_fp_dir")
-        self.assertEqual(result, "test-fp-1234")
+    def test_load_or_create_persists(self):
+        fp_dir = "/tmp/test_mimo_fp_module"
+        name = "be-test"
+        fp_path = os.path.join(fp_dir, f"fp_{name}")
+        for f in os.listdir(fp_dir) if os.path.isdir(fp_dir) else []:
+            if f.startswith("fp_"):
+                os.remove(os.path.join(fp_dir, f))
+        if os.path.exists(fp_path):
+            os.remove(fp_path)
+        fp1 = proxy.load_or_create_fingerprint(fp_dir, name)
+        self.assertEqual(len(fp1), 64)
+        self.assertTrue(os.path.exists(fp_path))
+        fp2 = proxy.load_or_create_fingerprint(fp_dir, name)
+        self.assertEqual(fp1, fp2)
 
 
 class TestMimoBackend(unittest.TestCase):
@@ -68,7 +75,8 @@ class TestMimoBackend(unittest.TestCase):
         for f in os.listdir(self.fp_dir):
             if f.startswith("fp_"):
                 os.remove(os.path.join(self.fp_dir, f))
-        proxy.fingerprint._global_fp = "test-fingerprint-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        with open(os.path.join(self.fp_dir, "fp_test"), "w") as f:
+            f.write("test-fingerprint-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
     def test_chat_sends_correct_headers(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
@@ -94,12 +102,11 @@ class TestMimoBackend(unittest.TestCase):
         mock_resp.headers = {"Content-Type": "application/json"}
         mock_resp.read.return_value = b'{}'
 
-        bodies = []
         with patch("urllib.request.OpenerDirector.open", return_value=mock_resp) as m:
             be.chat({"messages": [{"role": "user", "content": "hi"}]})
-            bodies.append(json.loads(m.call_args[0][0].data))
-        self.assertEqual(bodies[0]["temperature"], 1.0)
-        self.assertEqual(bodies[0]["model"], "mimo-auto")
+            body = json.loads(m.call_args[0][0].data)
+        self.assertEqual(body["temperature"], 1.0)
+        self.assertEqual(body["model"], "mimo-auto")
 
     def test_chat_model_forced(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
@@ -122,6 +129,34 @@ class TestMimoBackend(unittest.TestCase):
         with patch("urllib.request.OpenerDirector.open", return_value=mock_resp) as m:
             be.chat({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 999999})
             self.assertEqual(json.loads(m.call_args[0][0].data)["max_tokens"], 128000)
+
+    def test_chat_stream_forced(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.jwt = "test-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.read.return_value = b'{}'
+        with patch("urllib.request.OpenerDirector.open", return_value=mock_resp) as m:
+            be.chat({"messages": [{"role": "user", "content": "hi"}], "stream": False})
+            self.assertTrue(json.loads(m.call_args[0][0].data)["stream"])
+
+    def test_chat_extra_fields_stripped(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.jwt = "test-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.read.return_value = b'{}'
+        with patch("urllib.request.OpenerDirector.open", return_value=mock_resp) as m:
+            be.chat({"messages": [{"role": "user", "content": "hi"}],
+                     "frequency_penalty": 0.5, "presence_penalty": 0.3,
+                     "top_k": 50, "provider_options": {"mimo": {}}})
+            body = json.loads(m.call_args[0][0].data)
+        self.assertNotIn("frequency_penalty", body)
+        self.assertNotIn("presence_penalty", body)
+        self.assertNotIn("top_k", body)
+        self.assertNotIn("provider_options", body)
 
     def test_chat_401_retries(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
@@ -245,7 +280,9 @@ class TestServerIntegration(unittest.TestCase):
     def setUpClass(cls):
         cls.fp_dir = "/tmp/test_mimo_fp_server"
         os.makedirs(cls.fp_dir, exist_ok=True)
-        proxy.fingerprint._global_fp = "test-server-fp-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        for name in ("be1", "be2"):
+            with open(os.path.join(cls.fp_dir, f"fp_{name}"), "w") as f:
+                f.write(f"test-server-fp-{name}-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
         cls.b1 = proxy.MimoBackend("be1", None, cls.fp_dir)
         cls.b1.jwt = "test-jwt-1"
         cls.b1.jwt_exp = (time.time() + 3600) * 1000

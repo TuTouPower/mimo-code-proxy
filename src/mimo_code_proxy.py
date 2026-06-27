@@ -21,12 +21,8 @@ def main():
     backends = []
     for bc in backends_cfg:
         be = backend.MimoBackend(name=bc["name"], proxy_url=bc.get("proxy"), fingerprint_dir=fp_dir)
-        try:
-            be.get_jwt()
-            constants.log("INFO", f"[{be.name}] 就绪 (代理: {be.proxy_url or '直连'}, 指纹: {fingerprint._ensure_fp(fp_dir)[:12]}...)")
-        except Exception as e:
-            constants.log("WARN", f"bootstrap 失败 (请求时重试): {e}", backend=be.name)
-        be.start_jwt_refresher()
+        fp = fingerprint.load_or_create_fingerprint(fp_dir, bc["name"])
+        constants.log("INFO", f"[{be.name}] 就绪 (代理: {be.proxy_url or '直连'}, 指纹: {fp[:12]}...)")
         backends.append(be)
 
     balancer = backend.RoundRobin(backends)
