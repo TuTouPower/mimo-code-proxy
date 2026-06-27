@@ -223,7 +223,6 @@ class MimoBackend:
         payload.setdefault("max_tokens", MAX_OUTPUT_TOKENS)
         payload.pop("top_p", None)
         payload.pop("top_k", None)
-        payload["provider_options"] = {"mimo": {}}
 
         msgs = list(payload.get("messages") or [])
         sys_texts = " ".join(

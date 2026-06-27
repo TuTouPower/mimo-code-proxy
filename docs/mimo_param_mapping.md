@@ -12,7 +12,7 @@
 | `max_tokens` | 缺失时补默认 | `128000` | 用户传了就用用户的，不钳制 |
 | `top_p` | **删除** | — | 正版不发送（`transform.ts:526-532`） |
 | `top_k` | **删除** | — | 正版不发送（`transform.ts:535-542`） |
-| `provider_options` | **强制覆盖** | `{"mimo": {}}` | 正版固定值（`transform.ts:1126-1165`） |
+| `provider_options` | — | AI SDK 框架参数，不发送到服务端 |
 | `messages` | 缺品牌标识时**注入** | system msg（见下方） | 服务端校验 #9、#10 |
 
 ### messages 注入逻辑

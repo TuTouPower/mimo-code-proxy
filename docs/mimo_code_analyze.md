@@ -103,7 +103,8 @@ User-Agent 格式: `mimocode/{InstallationChannel}/{InstallationVersion}/{Flag.M
 | `messages` | 见下方 | `session/llm.ts:362-370` + `message-v2.ts:toModelMessages()` |
 | `tools` | 见下方 | `session/prompt.ts:resolveTools()` |
 | `tool_choice` | `"auto"` | `session/llm.ts:599` (默认) |
-| `provider_options` | `{"mimo": {}}` | `provider/transform.ts:1126-1165` |
+
+> `providerOptions` 是 AI SDK 框架参数 (`transform.ts:1164` 返回 `{"mimo": {}}`)，最终 HTTP 请求体中**不出现**此字段。
 
 #### `messages` 数组 (完整)
 
