@@ -67,6 +67,20 @@ class TestFingerprint(unittest.TestCase):
         fp2 = proxy.load_or_create_fingerprint(fp_dir, name)
         self.assertEqual(fp1, fp2)
 
+    def test_multi_name_independent(self):
+        fp_dir = "/tmp/test_mimo_fp_multi"
+        os.makedirs(fp_dir, exist_ok=True)
+        for f in os.listdir(fp_dir):
+            if f.startswith("fp_"):
+                os.remove(os.path.join(fp_dir, f))
+        proxy.load_or_create_fingerprint(fp_dir, "be-a")
+        proxy.load_or_create_fingerprint(fp_dir, "be-b")
+        self.assertTrue(os.path.exists(os.path.join(fp_dir, "fp_be-a")))
+        self.assertTrue(os.path.exists(os.path.join(fp_dir, "fp_be-b")))
+        with open(os.path.join(fp_dir, "fp_be-a")) as fa, \
+             open(os.path.join(fp_dir, "fp_be-b")) as fb:
+            self.assertEqual(fa.read(), fb.read())
+
 
 class TestMimoBackend(unittest.TestCase):
     def setUp(self):
@@ -180,6 +194,69 @@ class TestMimoBackend(unittest.TestCase):
             be.chat({"messages": [{"role": "user", "content": "hi"}]})
             self.assertEqual(call_count[0], 2)
 
+    def test_chat_403_retries(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.jwt = "old-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+        call_count = [0]
+
+        def _fake_open(req, timeout=300):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise urllib.error.HTTPError("url", 403, "Forbidden", {}, io.BytesIO(b"{}"))
+            mock_resp = MagicMock()
+            mock_resp.headers = {"Content-Type": "application/json"}
+            mock_resp.read.return_value = b'{"choices":[{"message":{"content":"ok"}}]}'
+            mock_resp.status = 200
+            return mock_resp
+
+        with patch("urllib.request.OpenerDirector.open", side_effect=_fake_open), \
+             patch.object(be, "_bootstrap") as mock_bootstrap:
+            mock_bootstrap.return_value = ("new-jwt", (time.time() + 3600) * 1000)
+            be.chat({"messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(call_count[0], 2)
+
+    def test_get_jwt_cached_reuse(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.jwt = "cached-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+        with patch.object(be, "_bootstrap") as mock_bs:
+            result = be.get_jwt()
+        self.assertEqual(result, "cached-jwt")
+        mock_bs.assert_not_called()
+
+    def test_chat_441_raises(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        be.jwt = "test-jwt"
+        be.jwt_exp = (time.time() + 3600) * 1000
+
+        def _fake_open(req, timeout=300):
+            raise urllib.error.HTTPError("url", 441, "Blocked", {}, io.BytesIO(b"{}"))
+
+        with patch("urllib.request.OpenerDirector.open", side_effect=_fake_open):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                be.chat({"messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(ctx.exception.code, 441)
+
+    def test_bootstrap_missing_jwt_raises(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{}'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        opener = MagicMock()
+        opener.open = MagicMock(return_value=mock_resp)
+        with patch.object(be, "_make_opener", return_value=opener):
+            with self.assertRaises(RuntimeError) as ctx:
+                be._bootstrap()
+            self.assertIn("bootstrap missing jwt", str(ctx.exception))
+
+    def test_decode_exp_malformed_jwt(self):
+        be = proxy.MimoBackend("test", None, self.fp_dir)
+        result = be._decode_exp("not.a.jwt")
+        self.assertIsInstance(result, float)
+        self.assertGreater(result, time.time() * 1000)
+
 
 class TestRoundRobin(unittest.TestCase):
     def test_picks_in_order(self):
@@ -255,6 +332,12 @@ class TestPathNormalization(unittest.TestCase):
     def test_trailing_slash(self):
         self.assertEqual(proxy.normalize_path("/v1/chat/completions/"), "/chat/completions")
 
+    def test_root_path(self):
+        self.assertEqual(proxy.normalize_path("/"), "")
+
+    def test_no_v1_chat(self):
+        self.assertEqual(proxy.normalize_path("/chat"), "/chat")
+
 
 class TestAnthropicMessages(unittest.TestCase):
     def test_convert_anthropic_to_openai_basic(self):
@@ -269,10 +352,50 @@ class TestAnthropicMessages(unittest.TestCase):
         oai = proxy.anthropic_to_openai(req)
         self.assertTrue(oai["stream"])
 
+    def test_convert_anthropic_system_array(self):
+        req = {
+            "model": "mimo-auto",
+            "system": [
+                {"type": "text", "text": "You are helpful."},
+                {"type": "text", "text": "Be concise."},
+            ],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        oai = proxy.anthropic_to_openai(req)
+        self.assertEqual(oai["messages"][0]["role"], "system")
+        self.assertEqual(oai["messages"][0]["content"], "You are helpful.")
+        self.assertEqual(oai["messages"][1]["role"], "system")
+        self.assertEqual(oai["messages"][1]["content"], "Be concise.")
+        self.assertEqual(oai["messages"][2]["role"], "user")
+
     def test_anthropic_stream_event_format(self):
         events = proxy.openai_sse_to_anthropic_sse_line(b'data: {"choices":[{"delta":{"content":"hi"}}]}\n')
         self.assertGreater(len(events), 0)
         self.assertEqual(events[0]["type"], "content_block_delta")
+
+    def test_anthropic_sse_full_sequence(self):
+        events = proxy.openai_sse_to_anthropic_sse_line(
+            b'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n'
+        )
+        self.assertEqual(events[0]["type"], "content_block_start")
+
+        events = proxy.openai_sse_to_anthropic_sse_line(
+            b'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n'
+        )
+        self.assertEqual(events[0]["type"], "content_block_delta")
+        self.assertEqual(events[0]["delta"]["text"], "Hi")
+
+        events = proxy.openai_sse_to_anthropic_sse_line(
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
+        )
+        types = [e["type"] for e in events]
+        self.assertIn("content_block_stop", types)
+        self.assertIn("message_delta", types)
+        self.assertIn("message_stop", types)
+
+    def test_anthropic_sse_done_ignored(self):
+        events = proxy.openai_sse_to_anthropic_sse_line(b"data: [DONE]\n")
+        self.assertEqual(len(events), 0)
 
 
 class TestServerIntegration(unittest.TestCase):
@@ -317,6 +440,12 @@ class TestServerIntegration(unittest.TestCase):
         data = json.loads(resp.read())
         self.assertEqual(data["status"], "ok")
         self.assertEqual(data["backends"], 2)
+
+    def test_cors_headers_present(self):
+        resp = self._get("/health", {"Origin": "http://localhost:3000"})
+        self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "*")
+        self.assertEqual(resp.headers.get("Access-Control-Allow-Headers"), "*")
+        self.assertEqual(resp.headers.get("Access-Control-Allow-Methods"), "GET, POST, OPTIONS")
 
     def test_models_with_valid_key(self):
         resp = self._get("/v1/models", {"Authorization": "Bearer sk-test-key"})
