@@ -368,6 +368,18 @@ class TestAnthropicMessages(unittest.TestCase):
         self.assertEqual(oai["messages"][1]["content"], "Be concise.")
         self.assertEqual(oai["messages"][2]["role"], "user")
 
+    def test_convert_anthropic_passes_tools(self):
+        req = {
+            "model": "mimo-auto",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "bash", "description": "run command"}],
+            "tool_choice": "auto",
+        }
+        oai = proxy.anthropic_to_openai(req)
+        self.assertEqual(len(oai["tools"]), 1)
+        self.assertEqual(oai["tools"][0]["name"], "bash")
+        self.assertEqual(oai["tool_choice"], "auto")
+
     def test_anthropic_stream_event_format(self):
         events = proxy.openai_sse_to_anthropic_sse_line(b'data: {"choices":[{"delta":{"content":"hi"}}]}\n')
         self.assertGreater(len(events), 0)

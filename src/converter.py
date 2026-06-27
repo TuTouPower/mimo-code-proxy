@@ -15,6 +15,10 @@ def anthropic_to_openai(req):
         oai["temperature"] = req["temperature"]
     if "top_p" in req:
         oai["top_p"] = req["top_p"]
+    if "tools" in req:
+        oai["tools"] = req["tools"]
+    if "tool_choice" in req:
+        oai["tool_choice"] = req["tool_choice"]
     messages = []
     system = req.get("system")
     if isinstance(system, str) and system:
