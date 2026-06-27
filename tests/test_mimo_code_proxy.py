@@ -12,7 +12,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 import mimo_code_proxy as proxy
 
 

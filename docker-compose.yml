@@ -10,7 +10,7 @@ services:
       - MIMO_LOG_LEVEL=INFO
       - MIMO_FREE_BASE_URL=${MIMO_FREE_BASE_URL:-https://api.xiaomimimo.com}
     volumes:
-      - ./mimo_config.json:/app/mimo_config.json:ro
+      - ./config/mimo_config.json:/app/mimo_config.json:ro
       - mimo-data:/data
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/v1/health')"]

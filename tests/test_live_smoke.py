@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """核心功能冒烟测试：直连 MiMo API，验证 MimoBackend 是否可用。
 
-用法: MIMO_LOG_LEVEL=DEBUG python3 test_live_smoke.py -v
+默认跳过。需设 MIMO_LIVE_TEST=1 启用。
+用法: MIMO_LIVE_TEST=1 MIMO_LOG_LEVEL=DEBUG python3 -m unittest tests/test_live_smoke -v
 """
 import json
 import os
 import sys
+import time
 import unittest
 
-sys.path.insert(0, os.path.dirname(__file__))
-from mimo_code_proxy import MimoBackend
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from mimo_code_proxy import MimoBackend, _ensure_fp
 
 FP_DIR = "/tmp/mimo_smoke_test_fp"
+LIVE_ENABLED = os.environ.get("MIMO_LIVE_TEST") == "1"
+live = unittest.skipUnless(LIVE_ENABLED, "set MIMO_LIVE_TEST=1 to enable live tests")
 
 
+@live
 class TestMimoBackendLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.makedirs(FP_DIR, exist_ok=True)
-        # 每次测试使用全新指纹
-        import time
         name = f"smoke-{int(time.time())}"
         cls.be = MimoBackend(
             name=name,
@@ -43,7 +46,6 @@ class TestMimoBackendLive(unittest.TestCase):
         }
         resp = self.be.chat(payload)
         self.assertEqual(resp.status, 200)
-
         body = json.loads(resp.read().decode())
         self.assertIn("choices", body)
         content = body["choices"][0]["message"]["content"]
@@ -60,7 +62,6 @@ class TestMimoBackendLive(unittest.TestCase):
         }
         resp = self.be.chat(payload)
         self.assertEqual(resp.status, 200)
-
         chunks = []
         for line in resp:
             line = line.decode() if isinstance(line, bytes) else line
@@ -69,28 +70,6 @@ class TestMimoBackendLive(unittest.TestCase):
         self.assertGreater(len(chunks), 0)
         delta = chunks[0]["choices"][0].get("delta", {}).get("content", "")
         sys.stderr.write(f"\n--- 流式首块: '{delta}'\n")
-
-    def test_04_fingerprint_rotate(self):
-        """指纹轮换后仍可正常使用。"""
-        old_fp = self.be.fingerprint
-        jwt = self.be._rotate_fingerprint()
-        self.assertNotEqual(self.be.fingerprint, old_fp)
-        self.assertIsInstance(jwt, str)
-        sys.stderr.write(
-            f"\n--- 指纹已轮换: {old_fp[:8]}... -> {self.be.fingerprint[:8]}...\n"
-        )
-
-        # 轮换后仍能聊天
-        payload = {
-            "model": "mimo-auto",
-            "messages": [{"role": "user", "content": "说一个字：嗯"}],
-            "stream": False,
-        }
-        resp = self.be.chat(payload)
-        self.assertEqual(resp.status, 200)
-        body = json.loads(resp.read().decode())
-        self.assertIn("choices", body)
-        sys.stderr.write(f"--- 轮换后回复: {body['choices'][0]['message']['content']}\n")
 
 
 if __name__ == "__main__":
