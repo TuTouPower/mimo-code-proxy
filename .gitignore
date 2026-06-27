@@ -5,3 +5,4 @@ __pycache__/
 mimo-data/
 vendors
 mimo_config.json
+docs/deploy.md

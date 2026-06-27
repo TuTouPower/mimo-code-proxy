@@ -98,3 +98,7 @@ cp config/mimo_config.example.json mimo_config.json
 # 编辑配置
 docker compose up -d
 ```
+
+## 部署
+
+服务器部署参考：[docs/deploy.md](docs/deploy.md)
