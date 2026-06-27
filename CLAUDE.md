@@ -101,4 +101,4 @@ docker compose up -d
 
 ## 部署
 
-服务器部署参考：[docs/deploy.md](docs/deploy.md)
+服务器部署与真测流程：[docs/server.md](docs/server.md)
