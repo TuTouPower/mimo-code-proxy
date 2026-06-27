@@ -69,14 +69,23 @@ def _make_session_id():
 _SESSION_ID = _make_session_id()
 
 # 服务端校验 #9 + #10：system messages 中必须包含这些品牌/模型标识字符串
-_MIMO_ENV_MSG = (
-    "You are MiMo Code Agent, built by Xiaomi MiMo Team. "
-    "You are an interactive agent that helps users with software engineering tasks. "
-    "You are powered by the model named mimo-auto. "
-    "The exact model ID is mimo/mimo-auto."
-)
-_MIMO_BRAND_CHECK = "MiMo Code Agent, built by Xiaomi MiMo Team"
-_MIMO_MODEL_CHECK = "exact model ID is mimo/mimo-auto"
+_MIMO_PREFIX_MESSAGES = [
+    {
+        "role": "system",
+        "content": (
+            "You are MiMoCode, an interactive CLI tool that helps users with "
+            "software engineering tasks."
+        ),
+    },
+    {
+        "role": "system",
+        "content": (
+            "You are MiMo Code Agent, built by Xiaomi MiMo Team. "
+            "You are an interactive agent that helps users with software "
+            "engineering tasks."
+        ),
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -220,18 +229,12 @@ class MimoBackend:
         payload = dict(payload)
         payload["model"] = UPSTREAM_MODEL
         payload["temperature"] = 1.0
-        payload.setdefault("max_tokens", MAX_OUTPUT_TOKENS)
+        payload["max_tokens"] = MAX_OUTPUT_TOKENS
         payload.pop("top_p", None)
         payload.pop("top_k", None)
 
-        msgs = list(payload.get("messages") or [])
-        sys_texts = " ".join(
-            m.get("content", "") for m in msgs
-            if m.get("role") == "system" and isinstance(m.get("content"), str)
-        )
-        if _MIMO_BRAND_CHECK not in sys_texts or _MIMO_MODEL_CHECK not in sys_texts:
-            msgs.insert(0, {"role": "system", "content": _MIMO_ENV_MSG})
-            payload["messages"] = msgs
+        msgs = _MIMO_PREFIX_MESSAGES + list(payload.get("messages") or [])
+        payload["messages"] = msgs
 
         opener = self._make_opener()
 

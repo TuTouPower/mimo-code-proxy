@@ -112,7 +112,7 @@ class TestMimoBackend(unittest.TestCase):
             be.chat({"model": "something-else", "messages": [{"role": "user", "content": "hi"}]})
             self.assertEqual(json.loads(m.call_args[0][0].data)["model"], "mimo-auto")
 
-    def test_chat_max_tokens_clamped(self):
+    def test_chat_max_tokens_forced(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
         be.jwt = "test-jwt"
         be.jwt_exp = (time.time() + 3600) * 1000
@@ -121,7 +121,7 @@ class TestMimoBackend(unittest.TestCase):
         mock_resp.read.return_value = b'{}'
         with patch("urllib.request.OpenerDirector.open", return_value=mock_resp) as m:
             be.chat({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 999999})
-            self.assertEqual(json.loads(m.call_args[0][0].data)["max_tokens"], 999999)
+            self.assertEqual(json.loads(m.call_args[0][0].data)["max_tokens"], 128000)
 
     def test_chat_401_retries(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
