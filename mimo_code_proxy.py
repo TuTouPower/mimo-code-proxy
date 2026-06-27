@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""MiMo 多出口代理轮询负载均衡器 -> OpenAI 兼容端点 (Docker 部署, stdlib only)。"""
+"""MiMo 多出口代理轮询负载均衡器 -> OpenAI 兼容端点 (Docker 部署, stdlib only)。
+
+模拟 MiMo Code CLI 的 mimo-free 扩展行为：
+Bootstrap(JWT) → /api/free-ai/openai/chat
+"""
 import argparse
 import base64
 import hashlib
@@ -21,29 +25,10 @@ UPSTREAM_BASE = os.environ.get(
 BOOTSTRAP_URL = f"{UPSTREAM_BASE}/api/free-ai/bootstrap"
 CHAT_URL = f"{UPSTREAM_BASE}/api/free-ai/openai/chat"
 UPSTREAM_MODEL = "mimo-auto"
-MAX_OUTPUT_TOKENS = 131072
+MAX_OUTPUT_TOKENS = 128000
 REFRESH_MARGIN = 300
 JWT_REFRESH_INTERVAL = 30
-
-USER_AGENT = "mimocode/1.0.0"
-
-_global_fp = None
-_global_fp_lock = threading.Lock()
-
-
-def _random_hex(n):
-    return secrets.token_hex(n)
-
-MIMO_GUARD_TEXT = (
-    "You are MiMoCode, an interactive CLI tool that helps users with "
-    "software engineering tasks. Use the instructions below and the tools "
-    "available to you to assist the user.\n\n"
-    "IMPORTANT: You must NEVER generate or guess URLs for the user unless you "
-    "are confident that the URLs are for helping the user with programming. "
-    "You may use URLs provided by the user in their messages or local files.\n\n"
-    "IMPORTANT: Assist with authorized security testing, defensive security, "
-    "CTF challenges, and educational contexts."
-)
+USER_AGENT = "mimocode/prod/0.1.3/cli"
 
 LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
 LOG_LEVEL = os.environ.get("MIMO_LOG_LEVEL", "INFO").upper()
@@ -68,60 +53,91 @@ def new_req_id():
     return uuid.uuid4().hex[:8]
 
 
+def _random_base62(n: int) -> str:
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    return "".join(chars[b % 62] for b in secrets.token_bytes(n))
+
+
+def _make_session_id():
+    """格式 ses_<12hex><14base62> = 26 字符，与 id/id.ts 的 Identifier.create 一致。"""
+    now = int(time.time() * 1000)
+    encoded = ~(now * 0x1000) & 0xFFFFFFFFFFFF
+    hex_part = encoded.to_bytes(6, "big").hex()
+    return "ses_" + hex_part + _random_base62(14)
+
+
+_SESSION_ID = _make_session_id()
+
+
 # ---------------------------------------------------------------------------
-# MiMo 后端: 独立指纹 + JWT + 出口代理
+# 指纹：SHA256(hostname|os|arch|cpu|username)，与 mimo-free 扩展一致
+# ---------------------------------------------------------------------------
+_global_fp = None
+_global_fp_lock = threading.Lock()
+_GLOBAL_FP_FILE = "fp_global"
+
+
+def _get_cpu_model():
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return platform.processor() or "unknown"
+
+
+def _normalize_arch(machine: str) -> str:
+    m = machine.lower()
+    if m in ("x86_64", "amd64"):
+        return "x64"
+    if m in ("aarch64", "arm64"):
+        return "arm64"
+    return m
+
+
+def _create_fp():
+    hostname = platform.node()
+    os_name = platform.system().lower()
+    arch = _normalize_arch(platform.machine())
+    cpu = _get_cpu_model()
+    username = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+    raw = f"{hostname}|{os_name}|{arch}|{cpu}|{username}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _ensure_fp(fp_dir):
+    global _global_fp
+    if _global_fp:
+        return _global_fp
+    with _global_fp_lock:
+        if _global_fp:
+            return _global_fp
+        fp_path = os.path.join(fp_dir, _GLOBAL_FP_FILE)
+        try:
+            with open(fp_path) as f:
+                _global_fp = f.read().strip()
+        except Exception:
+            _global_fp = _create_fp()
+            os.makedirs(fp_dir, exist_ok=True)
+            with open(fp_path, "w") as f:
+                f.write(_global_fp)
+            os.chmod(fp_path, 0o600)
+    return _global_fp
+
+
+# ---------------------------------------------------------------------------
+# MiMo 后端
 # ---------------------------------------------------------------------------
 class MimoBackend:
     def __init__(self, name, proxy_url, fingerprint_dir):
         self.name = name
         self.proxy_url = proxy_url
         self._fingerprint_dir = fingerprint_dir
-        self.fingerprint = None
         self.jwt = None
         self.jwt_exp = 0
         self._lock = threading.Lock()
-
-    def _fp_path(self):
-        return os.path.join(self._fingerprint_dir, "fp_global")
-
-    def _load_fp(self):
-        try:
-            with open(self._fp_path()) as f:
-                return f.read().strip()
-        except Exception:
-            return None
-
-    def _save_fp(self, fp):
-        os.makedirs(self._fingerprint_dir, exist_ok=True)
-        with open(self._fp_path(), "w") as f:
-            f.write(fp)
-        os.chmod(self._fp_path(), 0o600)
-
-    @staticmethod
-    def _create_fp():
-        hostname = platform.node()
-        os_name = platform.system()
-        arch = platform.machine()
-        username = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
-        uid = str(uuid.uuid4())
-        raw = f"{hostname}|{os_name}|{arch}|{username}|{uid}"
-        return hashlib.sha256(raw.encode()).hexdigest()
-
-    def ensure_fp(self):
-        global _global_fp
-        if _global_fp:
-            self.fingerprint = _global_fp
-            return
-        with _global_fp_lock:
-            if _global_fp:
-                self.fingerprint = _global_fp
-                return
-            fp = self._load_fp()
-            if not fp:
-                fp = self._create_fp()
-                self._save_fp(fp)
-            _global_fp = fp
-            self.fingerprint = fp
 
     def _make_opener(self):
         if not self.proxy_url:
@@ -136,7 +152,9 @@ class MimoBackend:
         try:
             part = jwt.split(".")[1]
             pad = 4 - len(part) % 4
-            p = json.loads(base64.urlsafe_b64decode(part + "=" * pad))
+            if pad != 4:
+                part += "=" * pad
+            p = json.loads(base64.urlsafe_b64decode(part))
             if isinstance(p.get("exp"), (int, float)):
                 return p["exp"] * 1000
         except Exception:
@@ -144,16 +162,13 @@ class MimoBackend:
         return time.time() * 1000 + 3600 * 1000
 
     def _bootstrap(self):
-        self.ensure_fp()
-        body = json.dumps({"client": self.fingerprint}).encode()
+        fp = _ensure_fp(self._fingerprint_dir)
+        body = json.dumps({"client": fp}).encode()
         req = urllib.request.Request(
             BOOTSTRAP_URL,
             data=body,
             method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": USER_AGENT,
-            },
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
         )
         with self._make_opener().open(req, timeout=30) as r:
             data = json.loads(r.read().decode())
@@ -187,49 +202,15 @@ class MimoBackend:
                     self.get_jwt()
                 except Exception as e:
                     log("DEBUG", f"JWT refresher: {e}", backend=self.name)
+
         t = threading.Thread(target=_run, daemon=True)
         t.start()
-
-    def _rotate_fingerprint(self, req_id=None):
-        """生成新指纹，重新 bootstrap JWT。"""
-        global _global_fp
-        old_fp = self.fingerprint[:8] + "..." if self.fingerprint else "none"
-        fp = self._create_fp()
-        with _global_fp_lock:
-            _global_fp = fp
-            self.fingerprint = fp
-        self._save_fp(fp)
-        self.jwt = None
-        self.jwt_exp = 0
-        log("INFO", f"fingerprint rotated {old_fp} -> {fp[:8]}...", req_id=req_id, backend=self.name)
-        self.jwt, self.jwt_exp = self._bootstrap()
-        return self.jwt
 
     def chat(self, payload, req_id=None):
         payload = dict(payload)
         payload["model"] = UPSTREAM_MODEL
-
-        msgs = list(payload.get("messages") or [])
-        already = (
-            msgs
-            and msgs[0].get("role") == "system"
-            and isinstance(msgs[0].get("content"), str)
-            and msgs[0]["content"].startswith(MIMO_GUARD_TEXT[:80])
-        )
-        if not already:
-            msgs.insert(0, {"role": "system", "content": MIMO_GUARD_TEXT})
-            payload["messages"] = msgs
-
-        for f in ("max_tokens", "max_completion_tokens"):
-            v = payload.get(f)
-            if isinstance(v, int) and v > MAX_OUTPUT_TOKENS:
-                log(
-                    "DEBUG",
-                    f"clamp {f} {v} -> {MAX_OUTPUT_TOKENS}",
-                    req_id=req_id,
-                    backend=self.name,
-                )
-                payload[f] = MAX_OUTPUT_TOKENS
+        payload["temperature"] = 1.0
+        payload.setdefault("max_tokens", MAX_OUTPUT_TOKENS)
 
         opener = self._make_opener()
 
@@ -242,9 +223,9 @@ class MimoBackend:
                 headers={
                     "Authorization": f"Bearer {jwt}",
                     "X-Mimo-Source": "mimocode-cli-free",
-                    "x-session-affinity": "ses_" + _random_hex(12),
-                    "User-Agent": USER_AGENT,
                     "Content-Type": "application/json",
+                    "User-Agent": USER_AGENT,
+                    "x-session-affinity": _SESSION_ID,
                 },
             )
             return opener.open(req, timeout=300)
@@ -253,30 +234,12 @@ class MimoBackend:
             return _do(self.get_jwt())
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
-                log(
-                    "WARN",
-                    f"got {e.code} -> refresh JWT retry",
-                    req_id=req_id,
-                    backend=self.name,
-                )
+                log("WARN", f"got {e.code} -> refresh JWT retry",
+                    req_id=req_id, backend=self.name)
                 return _do(self.get_jwt(force=True))
-            if e.code == 429:
-                log(
-                    "WARN",
-                    f"rate limited -> rotate fingerprint",
-                    req_id=req_id,
-                    backend=self.name,
-                )
-                with self._lock:
-                    self._rotate_fingerprint(req_id=req_id)
-                return _do(self.get_jwt())
             if e.code == 441:
-                log(
-                    "WARN",
-                    "upstream 441 risk control blocked",
-                    req_id=req_id,
-                    backend=self.name,
-                )
+                log("WARN", "upstream 441 risk control blocked",
+                    req_id=req_id, backend=self.name)
             raise
 
 
@@ -303,21 +266,11 @@ class RoundRobin:
 # HTTP Handler
 # ---------------------------------------------------------------------------
 def make_handler(balancer, api_key):
-    MODELS_RESP = json.dumps(
-        {
-            "object": "list",
-            "data": [
-                {
-                    "id": "mimo-auto",
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "xiaomi-mimo-free",
-                }
-            ],
-        }
-    ).encode()
+    MODELS_RESP = json.dumps({
+        "object": "list",
+        "data": [{"id": "mimo-auto", "object": "model", "created": 0, "owned_by": "xiaomi-mimo-free"}],
+    }).encode()
 
-    ANTHROPIC_MSG_RESP_ID = "msg_" + uuid.uuid4().hex[:24]
     _req_count = {}
 
     class Handler(BaseHTTPRequestHandler):
@@ -359,10 +312,10 @@ def make_handler(balancer, api_key):
             if np == "/health":
                 req_id = new_req_id()
                 log("DEBUG", "GET health", req_id=req_id)
-                return self._respond(
-                    200,
-                    json.dumps({"status": "ok", "backends": len(balancer), "requests": _req_count}).encode(),
-                )
+                return self._respond(200, json.dumps({
+                    "status": "ok", "backends": len(balancer),
+                    "requests": _req_count,
+                }).encode())
             self._respond(404, b'{"error":{"message":"not found"}}')
 
         def do_POST(self):
@@ -385,10 +338,7 @@ def make_handler(balancer, api_key):
                 payload = json.loads(self.rfile.read(n).decode())
             except Exception as e:
                 self._log_req(req_id, "-", 400, t_start)
-                return self._respond(
-                    400,
-                    json.dumps({"error": {"message": f"bad request: {e}"}}).encode(),
-                )
+                return self._respond(400, json.dumps({"error": {"message": f"bad request: {e}"}}).encode())
 
             last_error = None
             tried = set()
@@ -413,7 +363,6 @@ def make_handler(balancer, api_key):
                     log("WARN", f"upstream error: {e}", req_id=req_id, backend=tag)
                     continue
 
-                # Success - relay response
                 try:
                     is_stream = oai_payload.get("stream", False)
                     self.send_response(200)
@@ -422,7 +371,6 @@ def make_handler(balancer, api_key):
                         self.send_header("Content-Type", "text/event-stream" if is_stream else "application/json")
                         self.send_header("Connection", "close")
                         self.end_headers()
-
                         if not is_stream:
                             oai_body = json.loads(resp.read().decode())
                             choice = (oai_body.get("choices") or [{}])[0]
@@ -433,15 +381,13 @@ def make_handler(balancer, api_key):
                                 stop = "end_turn"
                             result = {
                                 "id": "msg_" + uuid.uuid4().hex[:24],
-                                "type": "message",
-                                "role": "assistant",
+                                "type": "message", "role": "assistant",
                                 "content": [{"type": "text", "text": content}],
                                 "model": oai_body.get("model", UPSTREAM_MODEL),
                                 "stop_reason": stop,
                                 "usage": {"input_tokens": 0, "output_tokens": oai_body.get("usage", {}).get("completion_tokens", 0)},
                             }
                             self.wfile.write(json.dumps(result, ensure_ascii=False).encode())
-                            log("DEBUG", "anthropic non-stream response", len(content), "chars", req_id=req_id, backend=tag)
                         else:
                             model = payload.get("model", UPSTREAM_MODEL)
                             msg_id = "msg_" + uuid.uuid4().hex[:24]
@@ -452,12 +398,13 @@ def make_handler(balancer, api_key):
                                 self.wfile.flush()
                             _emit([{
                                 "type": "message_start",
-                                "message": {"id": msg_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "usage": {"input_tokens": 0, "output_tokens": 0}},
+                                "message": {"id": msg_id, "type": "message", "role": "assistant", "model": model,
+                                             "content": [], "stop_reason": None,
+                                             "usage": {"input_tokens": 0, "output_tokens": 0}},
                             }])
                             total = 0
-                            t0 = time.time()
-                            done_seen = False
                             block_started = False
+                            done_seen = False
                             try:
                                 buf = b""
                                 while True:
@@ -477,16 +424,14 @@ def make_handler(balancer, api_key):
                                             elif ev["type"] in ("content_block_stop", "message_delta", "message_stop"):
                                                 done_seen = True
                                                 _emit([ev])
-                            except Exception as e:
-                                log("DEBUG", "anthropic stream relay ended", repr(e), req_id=req_id, backend=tag)
+                            except Exception:
+                                pass
                             if not done_seen:
                                 _emit([
                                     {"type": "content_block_stop", "index": 0},
                                     {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": total}},
                                     {"type": "message_stop"},
                                 ])
-                            elapsed = int((time.time() - t0) * 1000)
-                            log("DEBUG", "anthropic stream done", total, "chars", elapsed, "ms", f"DONE={done_seen}", req_id=req_id, backend=tag)
                     else:
                         self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
                         if not is_stream:
@@ -494,33 +439,23 @@ def make_handler(balancer, api_key):
                             self.send_header("Content-Length", str(len(body)))
                             self.end_headers()
                             self.wfile.write(body)
-                            log("DEBUG", "non-stream response", len(body), "bytes", req_id=req_id, backend=tag)
                         else:
                             self.send_header("Connection", "close")
                             self.end_headers()
-                            total = 0
-                            t0 = time.time()
-                            done_seen = False
                             try:
                                 while True:
                                     chunk = resp.read(1024)
                                     if not chunk:
                                         break
-                                    total += len(chunk)
                                     self.wfile.write(chunk)
                                     self.wfile.flush()
-                                    if b"[DONE]" in chunk:
-                                        done_seen = True
-                            except Exception as e:
-                                log("DEBUG", "stream relay ended", repr(e), req_id=req_id, backend=tag)
-                            elapsed = int((time.time() - t0) * 1000)
-                            log("DEBUG", "stream done", total, "bytes", elapsed, "ms", f"DONE={done_seen}", req_id=req_id, backend=tag)
+                            except Exception:
+                                pass
                 finally:
                     resp.close()
                 self._log_req(req_id, tag, 200, t_start)
                 return
 
-            # All backends failed
             if is_anthropic:
                 self._respond(502, json.dumps({
                     "type": "error",
@@ -534,14 +469,11 @@ def make_handler(balancer, api_key):
                         obj = json.loads(body)
                     except Exception:
                         obj = {"error": {"message": body[:500], "code": last_error.code}}
-                    log("DEBUG", "upstream HTTPError", last_error.code, req_id=req_id)
                     self._log_req(req_id, tag, last_error.code, t_start)
                     return self._respond(last_error.code, json.dumps(obj).encode())
                 log("ERROR", "upstream fatal", repr(last_error), req_id=req_id)
                 self._log_req(req_id, tag, 502, t_start)
-                return self._respond(
-                    502, json.dumps({"error": {"message": str(last_error)}}).encode(),
-                )
+                return self._respond(502, json.dumps({"error": {"message": str(last_error)}}).encode())
 
     return Handler
 
@@ -550,18 +482,13 @@ def make_handler(balancer, api_key):
 # 工具函数
 # ---------------------------------------------------------------------------
 def normalize_path(path):
-    """去掉查询串和尾斜杠，剥掉可选 /v1 前缀，返回精确末段。"""
     p = path.split("?")[0].rstrip("/")
     if p.startswith("/v1/"):
         return p[3:]
     return p
 
 
-# ---------------------------------------------------------------------------
-# Anthropic Messages API 格式转换
-# ---------------------------------------------------------------------------
 def anthropic_to_openai(req):
-    """Anthropic /v1/messages 请求体 → OpenAI /v1/chat/completions 请求体。"""
     oai = {"model": req.get("model", UPSTREAM_MODEL)}
     if req.get("stream"):
         oai["stream"] = True
@@ -571,7 +498,6 @@ def anthropic_to_openai(req):
         oai["temperature"] = req["temperature"]
     if "top_p" in req:
         oai["top_p"] = req["top_p"]
-
     messages = []
     system = req.get("system")
     if isinstance(system, str) and system:
@@ -580,74 +506,40 @@ def anthropic_to_openai(req):
         for block in system:
             if block.get("type") == "text":
                 messages.append({"role": "system", "content": block.get("text", "")})
-
     for msg in req.get("messages", []):
         messages.append(msg)
-
     oai["messages"] = messages
     return oai
 
 
-def build_anthropic_sse(events):
-    """将 Anthropic SSE 事件列表拼成 bytes 输出。"""
-    out = []
-    for ev in events:
-        out.append(f"event: {ev['type']}\n".encode())
-        out.append(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
-    return b"".join(out)
-
-
 def openai_sse_to_anthropic_sse_line(oai_chunk_line):
-    """解析一行 OpenAI SSE chunk → Anthropic SSE 事件列表。
-
-    Input: b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
-    Output: list of dict events (empty if nothing to emit)
-    """
     if not oai_chunk_line.startswith(b"data: "):
         return []
     payload_str = oai_chunk_line[6:].strip()
     if payload_str == "[DONE]":
         return []
-
     try:
         payload = json.loads(payload_str)
     except Exception:
         return []
-
     choice = (payload.get("choices") or [{}])[0]
     delta = choice.get("delta") or {}
     finish = choice.get("finish_reason")
-
     events = []
     if "role" in delta and delta["role"] == "assistant":
-        events.append({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        })
+        events.append({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
     elif "content" in delta and delta["content"]:
-        events.append({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": delta["content"]},
-        })
-
+        events.append({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta["content"]}})
     if finish:
         events.append({"type": "content_block_stop", "index": 0})
-        events.append({
-            "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
-            "usage": {"output_tokens": 0},
-        })
+        events.append({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}})
         events.append({"type": "message_stop"})
-
     return events
 
 
 def load_config(path):
     with open(path) as f:
         cfg = json.load(f)
-
     cfg.setdefault("listen", {})
     cfg["listen"].setdefault("host", "0.0.0.0")
     cfg["listen"].setdefault("port", 8788)
@@ -670,22 +562,13 @@ def load_config(path):
 # main
 # ---------------------------------------------------------------------------
 def main():
-    p = argparse.ArgumentParser(
-        description="MiMo 多出口代理轮询负载均衡器"
-    )
-    p.add_argument(
-        "-c",
-        "--config",
-        default=os.environ.get(
-            "MIMO_CONFIG",
-            os.path.join(os.path.dirname(__file__), "mimo_config.json"),
-        ),
-        help="配置文件路径 (默认: ./mimo_config.json 或 $MIMO_CONFIG)",
-    )
+    p = argparse.ArgumentParser(description="MiMo 多出口代理轮询负载均衡器")
+    p.add_argument("-c", "--config", default=os.environ.get(
+        "MIMO_CONFIG", os.path.join(os.path.dirname(__file__), "mimo_config.json")),
+        help="配置文件路径")
     args = p.parse_args()
 
     cfg = load_config(args.config)
-
     backends_cfg = cfg.get("backends", [])
     api_key = cfg["api_key"]
     listen = cfg["listen"]
@@ -693,24 +576,12 @@ def main():
 
     backends = []
     for bc in backends_cfg:
-        be = MimoBackend(
-            name=bc["name"],
-            proxy_url=bc.get("proxy"),
-            fingerprint_dir=fp_dir,
-        )
+        be = MimoBackend(name=bc["name"], proxy_url=bc.get("proxy"), fingerprint_dir=fp_dir)
         try:
             be.get_jwt()
-            log(
-                "INFO",
-                f"[{be.name}] 就绪 (代理: {be.proxy_url or '直连'}, "
-                f"指纹: {be.fingerprint[:12]}...)",
-            )
+            log("INFO", f"[{be.name}] 就绪 (代理: {be.proxy_url or '直连'}, 指纹: {_ensure_fp(fp_dir)[:12]}...)")
         except Exception as e:
-            log(
-                "WARN",
-                f"bootstrap 失败 (请求时重试): {e}",
-                backend=be.name,
-            )
+            log("WARN", f"bootstrap 失败 (请求时重试): {e}", backend=be.name)
         be.start_jwt_refresher()
         backends.append(be)
 
@@ -719,12 +590,7 @@ def main():
 
     host, port = listen["host"], listen["port"]
     srv = ThreadingHTTPServer((host, port), handler_cls)
-    log(
-        "INFO",
-        f"监听 http://{host}:{port}/v1  "
-        f"认证={'ON' if api_key else 'OFF'}  "
-        f"后端数={len(backends)}",
-    )
+    log("INFO", f"监听 http://{host}:{port}/v1  上游={CHAT_URL}  认证={'ON' if api_key else 'OFF'}  后端数={len(backends)}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
