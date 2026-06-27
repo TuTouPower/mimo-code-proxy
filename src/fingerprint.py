@@ -2,36 +2,31 @@
 """per-backend 设备指纹：SHA256(hostname|os|arch|cpu|username)，与 mimo-free 扩展一致"""
 import hashlib
 import os
-import platform
+
+_CPU_POOL = [
+    "Intel(R) Core(TM) i7-14700K",
+    "Intel(R) Core(TM) i9-14900K",
+    "Intel(R) Core(TM) i5-14600K",
+    "Intel(R) Core(TM) i7-13700K",
+    "Intel(R) Core(TM) i9-13900K",
+    "Intel(R) Core(TM) i5-13600K",
+    "AMD Ryzen 9 7950X",
+    "AMD Ryzen 7 7800X3D",
+    "AMD Ryzen 5 7600X",
+    "Intel(R) Core(TM) Ultra 9 285K",
+    "Intel(R) Core(TM) Ultra 7 265K",
+    "AMD Ryzen 9 9950X",
+]
 
 
-def _get_cpu_model():
-    try:
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if line.startswith("model name"):
-                    return line.split(":", 1)[1].strip()
-    except Exception:
-        pass
-    return platform.processor() or "unknown"
+def _pick_cpu(name: str) -> str:
+    i = sum(ord(c) for c in name) % len(_CPU_POOL)
+    return _CPU_POOL[i]
 
 
-def _normalize_arch(machine: str) -> str:
-    m = machine.lower()
-    if m in ("x86_64", "amd64"):
-        return "x64"
-    if m in ("aarch64", "arm64"):
-        return "arm64"
-    return m
-
-
-def create_fingerprint():
-    hostname = platform.node()
-    os_name = platform.system().lower()
-    arch = _normalize_arch(platform.machine())
-    cpu = _get_cpu_model()
-    username = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
-    raw = f"{hostname}|{os_name}|{arch}|{cpu}|{username}"
+def create_fingerprint(name: str = "") -> str:
+    cpu = _pick_cpu(name) if name else "unknown"
+    raw = f"{name}|linux|x64|{cpu}|{name or 'unknown'}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -42,7 +37,7 @@ def load_or_create_fingerprint(fp_dir, name):
         with open(fp_path) as f:
             return f.read().strip()
     except Exception:
-        fp = create_fingerprint()
+        fp = create_fingerprint(name)
         with open(fp_path, "w") as f:
             f.write(fp)
         os.chmod(fp_path, 0o600)

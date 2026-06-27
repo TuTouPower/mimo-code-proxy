@@ -79,7 +79,7 @@ class TestFingerprint(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(fp_dir, "fp_be-b")))
         with open(os.path.join(fp_dir, "fp_be-a")) as fa, \
              open(os.path.join(fp_dir, "fp_be-b")) as fb:
-            self.assertEqual(fa.read(), fb.read())
+            self.assertNotEqual(fa.read(), fb.read())
 
 
 class TestMimoBackend(unittest.TestCase):
