@@ -10,8 +10,8 @@ import sys
 import time
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from mimo_code_proxy import MimoBackend, _ensure_fp
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from src import MimoBackend
 
 FP_DIR = "/tmp/mimo_smoke_test_fp"
 LIVE_ENABLED = os.environ.get("MIMO_LIVE_TEST") == "1"

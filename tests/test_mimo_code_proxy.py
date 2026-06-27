@@ -12,8 +12,8 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-import mimo_code_proxy as proxy
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import src as proxy
 
 
 class TestLoadConfig(unittest.TestCase):
@@ -48,7 +48,7 @@ class TestLoadConfig(unittest.TestCase):
 
 class TestFingerprint(unittest.TestCase):
     def setUp(self):
-        proxy._global_fp = None
+        proxy.fingerprint._global_fp = None
 
     def test_create_fp_format(self):
         fp = proxy._create_fp()
@@ -56,7 +56,7 @@ class TestFingerprint(unittest.TestCase):
         self.assertIsInstance(fp, str)
 
     def test_global_singleton(self):
-        proxy._global_fp = "test-fp-1234"
+        proxy.fingerprint._global_fp = "test-fp-1234"
         result = proxy._ensure_fp("/tmp/test_fp_dir")
         self.assertEqual(result, "test-fp-1234")
 
@@ -68,7 +68,7 @@ class TestMimoBackend(unittest.TestCase):
         for f in os.listdir(self.fp_dir):
             if f.startswith("fp_"):
                 os.remove(os.path.join(self.fp_dir, f))
-        proxy._global_fp = "test-fingerprint-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        proxy.fingerprint._global_fp = "test-fingerprint-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
     def test_chat_sends_correct_headers(self):
         be = proxy.MimoBackend("test", None, self.fp_dir)
@@ -245,7 +245,7 @@ class TestServerIntegration(unittest.TestCase):
     def setUpClass(cls):
         cls.fp_dir = "/tmp/test_mimo_fp_server"
         os.makedirs(cls.fp_dir, exist_ok=True)
-        proxy._global_fp = "test-server-fp-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        proxy.fingerprint._global_fp = "test-server-fp-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
         cls.b1 = proxy.MimoBackend("be1", None, cls.fp_dir)
         cls.b1.jwt = "test-jwt-1"
         cls.b1.jwt_exp = (time.time() + 3600) * 1000
