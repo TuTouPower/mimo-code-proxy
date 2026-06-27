@@ -23,13 +23,12 @@ Client ──→ :8788 ──┬─→ backend sg-01 (proxy: 7890, fp: sha256-1,
 - **Full isolation**: Each backend has its own fingerprint file and JWT
 - **Automatic fallback**: If one backend fails, the request tries the next until all are exhausted
 - **Self-healing JWTs**: Auto-refresh before expiry; force-refresh on 401/403
-- **429 auto-rotate**: Rotates fingerprint and re-bootstraps when rate limited
 
 ## Quick Start
 
 ```bash
 # 1. Configure
-cp mimo_config.example.json mimo_config.json
+cp config/mimo_config.example.json mimo_config.json
 # Edit mimo_config.json, fill in your proxy addresses
 
 # 2. Start with Docker
@@ -87,7 +86,7 @@ curl http://localhost:8788/v1/messages \
 ## Local Run (No Docker)
 
 ```bash
-python3 mimo_code_proxy.py -c mimo_config.json
+python3 -m src.mimo_code_proxy -c mimo_config.json
 ```
 
 Requirements: Python 3.10+, stdlib only.
@@ -140,10 +139,10 @@ A single mihomo instance can provide multiple independent egress points. Just pu
 ## Testing
 
 ```bash
-python3 -m unittest test_mimo_code_proxy -v
+python3 -m unittest discover -s tests -v
 ```
 
-47 tests covering config loading, fingerprint generation, JWT refresh, round-robin distribution, error fallback, 429 fingerprint rotation, Anthropic format conversion, and end-to-end HTTP.
+36 tests covering config loading, fingerprint generation, JWT refresh, round-robin distribution, error fallback, parameter override, Anthropic format conversion, and end-to-end HTTP.
 
 ## Technical Constraints
 

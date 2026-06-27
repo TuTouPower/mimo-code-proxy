@@ -31,26 +31,28 @@ docker-compose.yml           # 本地部署
 ## 测试
 
 ```bash
-python3 -m unittest test_mimo_code_proxy -v
+python3 -m unittest discover -s tests -v
 ```
 
 测试覆盖：
 - 配置文件加载与验证
-- MimoBackend 指纹生成与持久化（SHA256，按 name 隔离）
+- 指纹生成与持久化（SHA256，格式对齐 MiMo Code CLI）
 - JWT 解码、过期刷新、401/403 强制刷新
-- RoundRobin 轮询正确性（含并发线程安全）
-- 鉴权逻辑（无 KEY / 正确 KEY / 错误 KEY / 缺少 header）
-- HTTP 端点：health（返回 backend 数）、models、chat completions
-- 多 backend 错误回退（单失败轮询到下一个）
+- RoundRobin 轮询（含并发线程安全）
+- 鉴权（无 KEY / 正确 KEY / 错误 KEY / 缺少 header）
+- HTTP 端点：health、models、chat completions
+- 多 backend 错误回退
 - 上游错误传播、404
-- Guard prompt 注入（不重复）
-- max_tokens 钳制
-- model 强制 mimo-auto
+- model/temperature/max_tokens/top_p/top_k 参数覆盖
+- system 消息品牌标识注入
 - 流式 / 非流式响应转发
+- Anthropic Messages API 格式转换
 
 ## 配置
 
 配置文件：`mimo_config.json`（或通过 `MIMO_CONFIG` 环境变量指定路径）
+
+模板：`config/mimo_config.example.json`
 
 ```json
 {
@@ -87,7 +89,7 @@ python3 -m unittest test_mimo_code_proxy -v
 ## Docker
 
 ```bash
-cp mimo_config.example.json mimo_config.json
+cp config/mimo_config.example.json mimo_config.json
 # 编辑配置
 docker compose up -d
 ```
