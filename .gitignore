@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 mimo-data/
 vendors
+mimo_config.json
