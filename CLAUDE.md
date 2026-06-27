@@ -31,7 +31,11 @@ docker-compose.yml           # 本地部署
 ## 测试
 
 ```bash
+# 单元测试（不含 live）
 python3 -m unittest discover -s tests -v
+
+# 真测（直连 MiMo API，需代理出口）
+MIMO_LIVE_TEST=1 python3 -m unittest tests.test_live_smoke -v
 ```
 
 测试覆盖：
